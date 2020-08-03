@@ -1,0 +1,1831 @@
+#!/bin/bash
+set -o posix
+
+# Date 07/2020
+
+# IPV4 (CIDR notation /24)
+# systemd
+
+# Virtualbox 6.1.12
+# Debian 10 buster kernel 4.19.0-9
+# Ubuntu 20.04 LTS (Focal Fossa) kernel 5.4.0-40-generic
+# Ubuntu 19.10 eoan Ermine kernel 5.3.0-55
+# Emmabuntus 10 4.19.0-9-amd64 #1 Debian 4.19.118-2+deb10u1 (2020-06-07)
+# Xubuntu 20.04 5.4.0-40-generic #44-ubuntu LTS 
+# Lubuntu 20.04
+
+# Debian-facile.org (Au top! Une initiation gratuite à linux, pédagogique, avec Légèreté et humour)
+# Rien à voir avec les man-pages ;)
+
+# http://wiki.debian.org/SecuringNFS
+# https://utcc.utoronto.ca
+# https://wiki.archlinux.org
+# https://askubuntu.com
+# https://doc.ubuntu-fr.org/
+# https://stackoverflow.com
+# https://codingbee.net
+
+# [SERVEUR]
+# TOTO donne son Linux, ses windows (au client)
+# TOTO monte sa /home dans son dossier /srv/nfs/TOTO/linux 
+# TOTO monte ses partitions windows dans /srv/nfs/TOTO/windows{1..9}
+# TOTO partage au client le dossier /srv/nfs
+
+# [CLIENT]
+# SISI prend les partitions de TOTO 
+# SISI monte sur son propre bureau, les partitions de TOTO, dans un dossier prefixé 'chez_'.(ex: chez_TOTO)
+
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+clear
+prenom_client="$(loginctl |grep -v root |awk 'NR == 2 {print $3}')"
+myservername="${prenom_client}"
+
+reseaux_actifs () {
+	if [ "${UPcount}" -ne '1' ]; then
+ UPdisplay="$(ip -br a |grep UP |awk '{print $1" "$3}' |column -t)"
+ UPcount="$(ip -br a |grep -c UP )" ;\
+ printf "\n\nRéseaux actifs\n"
+ N='1'
+ UPdisplay="$(ip -br a |grep UP |awk '{print $1"  "$3}' |column -t)" ;\
+ var="${UPdisplay}"
+ IFS=$'\n'
+ set "${var}"
+   for i in $@; do
+       printf "\33[01;31m[$N]\33[0;0m$i\n"
+       N=$(( $N + 1 ))
+   done
+ echo ''
+ read -p "Quelle ligne choisissez-vous parmi les réseaux actifs: " -sn 1 num ;\
+ clear
+	fi
+	  }
+
+Continuecase () {
+case $rep in 
+	 o|O) clear ;;
+	 n|N) printf "Annulé\n" && exit 0 ;;
+	 *) printf "Erreur\n" && exit 1;;
+esac
+}
+
+if ! id |grep -q 'id=0'; then
+  clear
+  printf "$(id |sed -e 's/).*//' -e 's+.*(++'), vous devez \33[01;31mpasser en root\n\n\33[0;0m"
+  exit 1
+fi
+         if [ -d /home/${prenom_client}/ ] && [ -d /home/${prenom_client}/Desktop ];then
+             bureau='Desktop'
+             myservername="${prenom_client}" ;\
+         elif [ -d /home/${prenom_client}/ ] && [ -d /home/${prenom_client}/Bureau ];then
+             bureau='Bureau'
+             myservername="${prenom_client}" ;\
+         else
+             printf "\33[01;31mImpossible de trouver la home\33[0;0m\n\n"
+             exit 1
+         fi
+addNFSgroup () {
+	if ! cat /etc/group |grep -q '^nfs.*1010:'; then
+	  addgroup --gid 1010 nfs &>/dev/null
+	  adduser ${prenom_client} nfs &>/dev/null
+	  setfacl -Rm g:\1010:rwX /home/${prenom_client}/ &>/dev/null
+	  find /home/${myservername}/  \( -user \0 -o -name '.*' \) -exec setfacl -m g:nfs:--- {} \; 
+	fi
+}
+
+delNFSgroup () {
+   countunitmnt="$(find /etc/systemd/system/ \( -name '*nfs*mount' -o -name '*chez*mount' \) |wc -l)"
+   checkgroup="$(cat /etc/group |grep -c '^nfs.*1010:')"
+     if [ "${checkgroup}" -eq '1' ] && [ "${countunitmnt}" -eq '0' ]; then
+       delgroup nfs &>/dev/null
+       setfacl -Rb /home/${prenom_client}/ &>/dev/null
+       systemctl stop nfs-kernel-server &>/dev/null
+       systemctl disable nfs-kernel-server &>/dev/null
+     fi
+}
+
+	   startautomnt () {
+  IFS=$'\n'
+  unitname="$(find /etc/systemd/system/ -maxdepth 1 -name "*chez*" -exec basename {} \;)"
+  countunit="$(find /etc/systemd/system/ -maxdepth 1 -name "*chez*" |wc -l)"
+  if [ "${countunit}" -ne '0' ]; then
+      unitname="$(find /etc/systemd/system/ -name "*chez*\.mount" -exec basename {} \; |sed 's_\..*__' |uniq)"
+      declare -a unit=($unitname)
+	for i in ${!unit[@]}; do
+	      if [ "$(systemctl is-active "${i}.automount")" == 'inactive' ]; then
+	        systemctl start ${unit[$i]}.automount
+	      fi
+      done
+  fi
+}
+
+if [ "$*" == 'stop' ] && [ "$#" -eq '1' ] || [ -z "$*" ]; then
+zombie () {
+	unitname="$(find /etc/systemd/system/ -maxdepth 1 \( -name "*chez*" -o -name "srv-nfs*" \) -exec basename {} \;)"
+  	countunit="$(find /etc/systemd/system/ -maxdepth 1 \( -name "*chez*" -o -name "srv-nfs*" \) |wc -l)"
+  if [ "${countunit}" -ne '0' ]; then
+      unitname="$(find /etc/systemd/system/ \( -name "*chez*\.mount" -o -name "srv-nfs*" \) -exec basename {} \; |sed 's_\..*__' |uniq)"
+      declare -a unit=($unitname)
+	for i in ${!unit[@]}; do
+	   chezsubdir="$(systemd-escape -u ${unit[$i]} |sed 's:^:/:')"
+	   unit="$(echo ${chezsubdir} |tr '/' '-' |sed 's/-//')"
+	   chez="$(echo ${chezsubdir} |sed 's/\// /5' |awk '{print $1}')"
+	   sms="$( echo ${chezsubdir} |sed -e 's_/_ _g' -e 's+_+ +' |awk '{print "\33[01;31mImpossible de joindre "$6, $4 ,$5"\33[0;0m\n"}')"
+	   encours="$( echo ${chezsubdir} |sed -e 's_/_ _g' -e 's+_+ +' |awk '{print "\nRecherche de "$6, $4 ,$5"\n"}')"
+	   printf "${encours}\n"
+          timeout 5s ls ${chezsubdir} &>/dev/null
+	       if [ "$?" -eq '124' ]; then
+	         printf "$sms"
+		 if [ "${#unit[@]}" -eq '1' ]; then
+	         sleep 1
+		 fi
+	       fi
+	done
+  fi
+}
+zombie
+fi
+clear
+virtualbox () {
+   hostfolder="sharefolderVbox"
+   vmfolder="host"
+    if hostnamectl |grep -q oracle && ! mount |grep -q vboxsf ; then
+      mount -t vboxsf ${hostfolder} /home/${prenom_client}/${bureau}/${vmfolder} 
+    fi
+}
+
+clientbeforeNFSremove () {
+         countimport="$(mount |grep -v 'n /s' |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |cut -d '/' -f '1,4,5' |tr ':/' ' ' |awk '{print $2" "$1" "$3}' |uniq |wc -l)"
+           if [ "${countimport}" -ne '0' ]; then
+  	     printf "Vous devez d'abord arrêter l'importation\n\n"
+	     exit 1
+	   fi
+   }
+
+serverbeforeNFSremove () {
+	countexport="$(mount |grep -v '^/dev/fuse' |egrep -c '^/d.* /.*/.*/')"
+  	     if [ "${countexport}" -ne '0' ];then
+  	       printf "Vous devez d'abord arrêter l'exportation\n\n"
+	       exit 1
+	     fi
+     }
+
+
+  deleteFW () {
+        if systemctl -q is-enabled ufw &>/dev/null; then
+  	    nurules="$(ufw status numbered |grep -i nfs |sed 's/^\[ \([[:digit:]]*\)\].*/\1/')"
+    	    mnt="$(mount |grep -c '^/d.* /s')"
+  	      if [ "${mnt}" -eq '0' ]; then
+  	        if [ -n "${nurules}" ]; then
+		printf "\n\tEffacer les rêgles NFS avec y (y|n)\n\n\n"
+  	        set $nurules
+  	           for (( c=1 ; c<=$# ; c++ )); do
+                         ufw delete $1
+                     done
+  	        fi
+  	      fi
+      elif ! apt-cache policy iptables |egrep -q "(aucun|none)"; then
+  	     if [ "$(iptables -L |wc -l)" -gt '8' ]; then
+   	       nurules="$(iptables -L --line-numbers |grep NFS |awk '{print $1}')"
+  	       set $nurules
+  	         for (( c=1 ; c<=$# ; c++ )); do
+  	             iptables -D INPUT $1
+  	         done
+  	       printf "[\33[01;32m OK\33[0;0m ] Configuration de iptables\n" 
+  	             if [ -d '/etc/iptables/' ]; then
+  	                 iptables-save -f "/etc/iptables/rules.v4"
+  	                 printf "Nouvelle configuration iptables\n"
+  	                 printf "Nouveau fichier /etc/iptables/rules.v4, à persister\n" 
+  	                 printf "Au prochain reboot, vérifier la config\n\n"
+                     else 
+  	                 iptables-save -f "/home/${myservername}/${bureau}/iptables.rules"
+  	                 printf "Nouvelle configuration iptables\n"
+  	                 printf "Fichier iptables.rules sur le bureau, à persister\n" 
+  	                 printf "Au prochain reboot, iptables effacera cette conf\n\n"
+  	             fi
+  	     fi
+        else
+    	    printf "Firewall ufw et iptables sont absents\n\33[01;32mSi vous avez un Firewall\33[0;0m:"
+    	    printf "\nAutorisez ports de destination tcp/udp 111,2049 et de 32764 à 32769\n"
+    	    print "de votre réseau local (ex: 192.168.X.0/24) à entrer sur votre PC\n"
+        fi
+
+  }
+
+  #Réseaux actifs
+  UPcount="$(ip -br a |grep -c UP )"
+  UPdisplay="$(ip -br a |awk '/UP/ {print $1"  "$3}' |column -t)" ;\
+  IP="$(ip -br a | grep UP |awk '{print $3}')"
+  NET="$(ip -br a |grep UP |awk '{print $3}' |cut -d '.' -f '1-3' |sed 's/$/.0\/24/')"
+  IPcut="$(ip -br a |grep UP |awk '{print $3}' |cut -d '.' -f '1-3' |sed 's/$/./')"
+
+
+
+         countimport="$(mount |grep -v 'n /s' |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |cut -d '/' -f '1,4,5' |tr ':/' ' ' |awk '{print $2" "$1" "$3}' |uniq |wc -l)"
+	 countexport="$(mount |grep -v '/dev/fuse' |egrep -c '^/d.* /.*/.*/')"
+	 countunitfailed="$(systemctl --state=failed |egrep -c '*\.mount')"
+	 failunitname="$(systemctl --state=failed |egrep '*\.mount' |awk '{print $2}')"
+	 if [ -n "${failunitname}" ]; then
+	 importfail="$(systemctl cat ${failunitname} |grep '^Wha' |awk -F":|=|/" '{print "IP: "$2" de "$6" "$7}' |column -t |sort)"
+	 fi
+	 checkimport="$(mount |grep -v 'n /s' |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |tr '/:' ' ' | sed 's:chez_:chez :' |awk '{print $1,$10,$11" donne "$12}' |uniq |column -t |sort)"
+	 #checkimport="$(mount |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |cut -d '/' -f '1,4,5' |tr ':/' ' ' |awk '{print "IP: "$1" de "$2" donne "$3}' |uniq |column -t |sort)"
+ 	 alreadyexport="$(mount |egrep "^/d.*n /s.*/(nfs/${myservername})" |sed -e 's+/+ +5' -e 's+/+ +5' |awk '{print "Notre "$4" donne "$1" "$5}' |column -t |sort)"
+	 IFS=$'\n'
+	 nocidr="$(ip -br a |grep UP |awk '{print $3}' |sed 's+/.*++')"
+	 declare -a IP=($nocidr)
+	 declare -a importF=($importfail)
+	 declare -a import=($checkimport)
+	 declare -a exportall=($alreadyexport)
+
+  	    if [ "$(ip -br a |grep -c UP)" -eq '1' ]; then
+ 	        UPdisplay="$(ip -br a |grep UP |awk '{print $3"      "}')" ;\
+		declare -a up=($UPdisplay)
+  	    else
+ 	        UPdisplay="$(ip -br a |grep UP |awk '{print $1"  "$3}' |column -t)" ;\
+		declare -a up=($UPdisplay)
+  	    fi
+              if [ "$1" != "aide" ] && [ "$1" != "donne" ] && [ "$1" != "stop" ] && [ "$1" != '' ]; then 
+                printf "Choix \'$1\' inconnu\n"
+                exit 1
+              fi
+	menuentry () {
+              if [ "${UPcount}" -eq '0' ] ; then
+                  printf '\n\33[01;32mCTRL+C pour quitter\33[0;0m\n\n\n'
+                  printf "\33[1;31maucune connexion internet!\n";\
+                  printf "\33[0;00m\n\n";\
+		  exit 1
+	      fi
+case $1 in 
+	1) declare -a right=("ECHEC IMPORTATION:" $importfail ' ') && N='0'
+	   max="${#right[@]}"
+	;;
+	2) if [ -n "${#importF[@]}" ] && [ "${#importF[@]}" -eq '0' ]; then
+	     declare -a right=("IMPORTATION:" $checkimport ' ' )
+	     N='0'
+	     max="${#right[@]}"
+
+	   elif [ -n "${#importF[@]}" ] && [ "${#importF[@]}" -ne '0' ]; then
+	     declare -a right=('ECH' ${importF[@]} 'space'  "IMPORTATION:" ${import[@]} ' ')
+	     N=$(( "${#importF[@]}" + 2 ))
+	     max="${#right[@]}"
+	   fi
+	;; 
+	3) if [ -n "${#importF[@]}" ] &&  [ "${#importF[@]}" -ne '0' ] && [ "${#import[@]}" -ne '0' ]; then
+ 	     declare -a right=('ECH' ${importF[@]} 'space' 'IMP' ${import[@]} ' '  "EXPORTATION:" $alreadyexport ' ')
+ 	     N=$(( "${#importF[@]}" + "${#import[@]}" + 4 )) && max="${#right[@]}"
+	 elif [ -n "${#importF[@]}" ] &&  [ "${#importF[@]}" -ne '0' ] && [ "${#import[@]}" -eq '0' ]; then
+ 	     declare -a right=('ECH' ${importF[@]} 'space' "EXPORTATION:" $alreadyexport ' ')
+ 	     N=$(( "${#importF[@]}" + 2 )) && max="${#right[@]}"
+
+         elif [ -n "${#importF[@]}" ] &&  [ "${#importF[@]}" -eq '0' ] && [ "${#import[@]}" -ne '0' ]; then
+             declare -a right=( 'IMP' ${import[@]} 'space'  "EXPORTATION:" $alreadyexport ' ')
+             N=$(( "${#import[@]}" + 2 )) && max="${#right[@]}" 
+
+         elif [ -n "${#importF[@]}" ] &&  [ "${#importF[@]}" -eq '0' ] && [ "${#import[@]}" -eq '0' ]; then
+ 	     declare -a right=("EXPORTATION:" $alreadyexport ' ')
+ 	     max="${#right[@]}" && N='0'
+ 	  fi
+	;;
+	4)   maximumline () {
+		 if [ "${#right[@]}" -gt $(( 20 + "${#up[@]}" )) ]; then
+		     max="${#right[@]}"
+	         else
+	             max=$(( 20 + "${#up[@]}" ))
+		 fi
+	 }
+
+	     if [ "${#importF[@]}" -eq '0' ] && [ "${#import[@]}" -eq '0' ] && [ "${#exportall[@]}" -eq '0' ]; then
+		N='0' 
+		maximumline
+	   elif [ "${#importF[@]}" -eq '0' ] && [ "${#import[@]}" -eq '0' ] && [ "${#exportall[@]}" -ne '0' ]; then
+		declare -a right=( "EXPORTATION:" $alreadyexport 'space' ' ' )
+		N=$(( ${#exportall[@]} + 2 )) 
+		maximumline
+	   elif [ "${#importF[@]}" -eq '0' ] && [ "${#import[@]}" -ne '0' ] && [ "${#exportall[@]}" -eq '0' ]; then
+		declare -a right=( 'IMP' ${import[@]} 'space' ' ' )
+		N=$(( ${#import[@]} + 2 ))
+		maximumline
+	   elif [ "${#importF[@]}" -eq '0' ] && [ "${#import[@]}" -ne '0' ] && [ "${#exportall[@]}" -ne '0' ]; then
+		declare -a right=( 'IMP' ${import[@]} 'space'  "EXPORTATION:" $alreadyexport 'space' ' ' )
+		N=$(( "${#import[@]}" + "${#exportall[@]}" + 4 )) 
+		maximumline
+	   elif [ "${#importF[@]}" -ne '0' ] && [ "${#import[@]}" -ne '0' ] && [ "${#exportall[@]}" -ne '0' ]; then
+		declare -a right=( 'ECH' ${importF[@]} 'space' 'IMP' ${import[@]} 'space'  "EXPORTATION:" $alreadyexport 'space' ' ' )
+		 N=$(( "${#importF[@]}" + "${#import[@]}" + "${#exportall[@]}" + 6 ))
+		 maximumline
+	   elif [ "${#importF[@]}" -ne '0' ] && [ "${#import[@]}" -ne '0' ] && [ "${#exportall[@]}" -eq '0' ]; then
+		declare -a right=( 'ECH' ${importF[@]} 'space' 'IMP' ${import[@]} 'space' ' ' )
+	         N=$(( "${#importF[@]}" + "${#import[@]}" + 4 ))
+		 maximumline
+	   elif [ "${#importF[@]}" -ne '0' ] && [ "${#import[@]}" -eq '0' ] && [ "${#exportall[@]}" -ne '0' ]; then
+		declare -a right=( 'ECH' ${importF[@]} 'space' 'EXP' ${exportall[@]} 'space' ' ' )
+		 N=$(( "${#exportall[@]}" + "${#importF[@]}" + 4 ))
+		 maximumline
+	   elif [ "${#importF[@]}" -ne '0' ] && [ "${#import[@]}" -eq '0' ] && [ "${#exportall[@]}" -eq '0' ]; then
+		declare -a right=( 'ECH' ${importF[@]} 'space' ' ' )
+		 N=$(( "${#importF[@]}" + 2 ))
+		 maximumline
+	     fi
+   	;;
+esac
+      if [ "${UPcount}" -eq '0' ]; then
+          printf '\n\33[01;32mCTRL+C pour quitter\33[0;0m\n\n\n'
+          printf "\33[1;31maucune connexion internet!\n";\
+          printf "\33[0;00m\n\n";\
+          exit 1
+      fi
+         if [ "$N" -eq '0' ] && [ "$N" -lt "${max}" ]; then
+    	   printf "\33[01;32mCTRL+C pour quitter\33[0;0m\n\n\n"
+           printf "EXPORTER NOTRE SERVEUR\t\t  ${right[$N]}\n"
+           N=$(( $N + 1 ))
+         fi
+     if [ "$N" -eq '1' ] && [ "$N" -lt "${max}" ]; then
+       printf "\33[1;31m[1]\33[0;00m:Je donne\t\t\t$oneip  ${right[$N]}\n"
+       N=$(( $N + 1 ))
+     fi
+       if [ "$N" -eq '2' ] && [ "$N" -lt "${max}" ]; then
+         printf "\t\t\t\t  ${right[$N]}\n"
+         N=$(( $N + 1 ))
+       fi
+     if [ "$N" -eq '3' ] && [ "$N" -lt "${max}" ]; then
+         printf "IMPORTER UN SERVEUR\t\t  ${right[$N]}\n"
+         N=$(( $N + 1 ))
+     fi
+       if [ "$N" -eq '4' ] && [ "$N" -lt "${max}" ]; then
+         printf "\33[1;31m[2]\33[0;00m:Je prends\t\t\t  ${right[$N]}\n"
+         N=$(( $N + 1 ))
+       fi
+          if [ "$N" -eq '5' ] && [ "$N" -lt "${max}" ]; then
+            printf "\t\t\t\t  ${right[$N]}\n"
+            N=$(( $N + 1 ))
+          fi
+       if [ "$N" -eq '6' ] && [ "$N" -lt "${max}" ]; then
+         printf "SUPPRIMER EXPORTATION\t\t  ${right[$N]}\n"
+         N=$(( $N + 1 ))
+       fi
+         if [ "$N" -eq '7' ] && [ "$N" -lt "${max}" ]; then
+           printf "\33[1;31m[3]\33[0;00m:Un partage\t\t\t  ${right[$N]}\n"
+           N=$(( $N + 1 ))
+         fi
+       if [ "$N" -eq '8' ] && [ "$N" -lt "${max}" ]; then
+         printf "\33[1;31m[4]\33[0;00m:Les partages\t\t  ${right[$N]}\n"
+         N=$(( $N + 1 ))
+       fi
+         if [ "$N" -eq '9' ] && [ "$N" -lt "${max}" ]; then
+           printf "\t\t\t          ${right[$N]}\n"
+           N=$(( $N + 1 ))
+         fi
+       if [ "$N" -eq '10' ] && [ "$N" -lt "${max}" ]; then
+         printf "SUPPRIMER IMPORTATION\t\t  ${right[$N]}\n"
+         N=$(( $N + 1 ))
+       fi
+         if [ "$N" -eq '11' ] && [ "$N" -lt "${max}" ]; then
+           printf "\33[1;31m[5]\33[0;00m:Un serveur\t\t\t  ${right[$N]}\n"
+           N=$(( $N + 1 ))
+         fi
+            if [ "$N" -eq '12' ] && [ "$N" -lt "${max}" ]; then
+              printf "\33[1;31m[6]\33[0;00m:Les serveurs\t\t  ${right[$N]}\n"
+              N=$(( $N + 1 ))
+            fi
+       if [ "$N" -eq '13' ] && [ "$N" -lt "${max}" ]; then
+       	 printf "\t\t\t          ${right[$N]}\n"
+         N=$(( $N + 1 ))
+       fi
+           if [ "$N" -eq '14' ] && [ "$N" -lt "${max}" ]; then
+             printf "DEINSTALLATION PAQUETS\t\t  ${right[$N]}\n"
+             N=$(( $N + 1 ))
+           fi
+         if [ "$N" -eq '15' ] && [ "$N" -lt "${max}" ]; then
+           printf "\33[1;31m[7]\33[0;00m:NFS serveur\t\t\t  ${right[$N]}\n"
+           N=$(( $N + 1 ))
+	 fi
+       if [ "$N" -eq '16' ] && [ "$N" -lt "${max}" ]; then
+         printf "\33[1;31m[8]\33[0;00m:NFS client\t\t\t  ${right[$N]}\n"
+         N=$(( $N + 1 ))
+       fi
+         if [ "$N" -eq '17' ] && [ "$N" -lt "${max}" ]; then
+           printf "\t\t\t          ${right[$N]}\n"
+           N=$(( $N + 1 ))
+	 fi
+     if [ "$N" -eq '18' ] && [ "$N" -lt "${max}" ]; then
+       if [ "${#up[@]}" -gt '1' ]; then
+         printf "Vos cartes réseaux activent\t  ${right[$N]}\n"
+      else
+         printf "Votre IP active\t\t\t  ${right[$N]}\n"
+       fi
+         N=$(( $N + 1 ))
+     fi
+       if [ "$N" -eq '19' ] && [ "$N" -lt "${max}" ]; then
+            for i in ${up[@]}; do
+               printf "${i}\t\t  ${right[$N]}\n"
+               N=$(( $N + 1 ))
+          done
+       fi
+         while [ "$N" -gt '19' ] && [ "$N" -lt "${max}" ]; do 
+              if [ "${#up[@]}" -gt '1' ] && [ "$N" -eq "$(( "${max}" - "${#up[@]}" ))" ]; then
+                  printf "\t\t\t          ${right[$N]}\n"
+                  N=$(( $N + 1 ))
+              else
+                  printf "\t\t\t          ${right[$N]}\n"
+                  N=$(( $N + 1 ))
+              fi
+     done 
+	 if [ "$N" -gt '19' ] && [ "$N" -eq "${max}" ] && [ "$Y" -eq '4' ]; then
+	   N=$(( $N + 1 ))
+           read -p "Tapez le numéro de votre choix: " -sn 1 config
+           clear
+	   break 0
+	 fi
+}
+
+round () {
+   IFS=$'\n'
+   declare -a importF=($importfail)
+   declare -a import=($checkimport)
+   declare -a exportall=($alreadyexport)
+     if [ -z "$Y" ]; then
+       Y='0'
+     fi
+ 	if [ -z "$1" ]; then
+ 	  while [ "$Y"  -ne '4' ]; do
+ 	  if [ "${#importfail[@]}" -ne '0' ] && [ "$Y" -eq '0' ]; then
+ 	        Y='1'
+ 	    menuentry 1
+ 	  elif [ "${#import[@]}" -ne '0' ] && [ "$Y" -lt '2' ]; then
+ 	        Y='2'
+ 	      menuentry 2
+ 	  elif [ "${#exportall[@]}" -ne '0' ] && [ "$Y" -lt '3' ]; then
+ 	        Y='3'
+ 	       menuentry 3
+ 	  else
+ 	  	Y='4'
+ 	      menuentry 4
+ 	  fi
+ 	  done
+
+ 	fi
+
+}
+	  body () {
+  case $config in
+
+1) #EXPORTATION
+  addNFSgroup
+  srvenabled="$(systemctl is-enabled nfs-kernel-server)"
+  srvfailed="$(systemctl is-failed nfs-kernel-server)"
+  clear
+ if apt-cache policy nfs-kernel-server |egrep -q "(none|aucun)"; then
+    printf "\33[01;31mVeuillez installer nfs-kernel-server\33[0;0m\n\n"
+    read -p "Continuer ? [O/n] " -sn 1 rep
+    clear
+      case $rep in
+          o|O) apt-get update && apt-get install -y nfs-kernel-server && clear;;
+          n|N) printf "Annuler\n" && exit 0 ;;
+          *) printf "Choix \'$rep\' inconnu\n" && exit 1;;
+      esac
+  elif [ "${srvenabled}" == 'disabled' ]; then # && [ "${unitdisabled}" -eq '1' ]; then
+     systemctl -q start nfs-kernel-server &>/dev/null
+     systemctl -q enable nfs-kernel-server &>/dev/null
+  fi
+    if [ "${srvfailed}" == 'failed' ]; then
+      systemctl restart nfs-kernel-server
+    fi
+    countmnt="$(mount |egrep -v "(^/dev/fuse|linux)" |grep -c '^/d.* /.*/.*/')"
+  countdisk="$(fdisk -l |egrep -ci '(ntfs|microsoft)')"
+  checkbind="$(mount |grep -c "^/d.*nfs/.*linux ")"
+  countshowin="$(showmount -e |sed 's+/+ +4' |grep -v linux |egrep -c '(/.*){4}')"
+    if [ "${countmnt}" -eq "${countdisk}" ]; then
+	    if [ "${countshowin}" -eq "${countdisk}" ]; then
+          OS='1'
+      else
+          printf "[\33[01;32m OK ] Point de montage windows\n"
+          printf "[\33[01;31m ECHEC ] exportation windows\n"
+          printf "Vérifiez manuellement /etc/exportfs, le réseau\n\n"
+          exit 1
+       fi
+    fi
+          if [[ "${OS}" =~ [[:digit:]] ]] && [ "${checkbind}" -ne '0' ] && [ "$OS" -eq '1' ]; then
+            if showmount -e |grep -q 'linux'; then
+                printf "\33[01;31mAucune partition à exporter\33[0;0m\n\n"
+                exit 0
+            else
+                printf "[\33[01;32m OK ] Point de montage Linux\n"
+                printf "[\33[01;31m ECHEC ] exportation Linux\n"
+                printf "Vérifiez manuellement /etc/exportfs, le réseau\n\n"
+                exit 1
+            fi
+	  fi
+        if [ "${countmnt}" -lt "${countdisk}" ] && [ "${checkbind}" -eq '1' ]; then
+          OS='2'
+	fi  
+          if [ "${checkbind}" -eq '0' ] && [ "${countmnt}" -eq "${countdisk}" ];then
+            OS='1'
+          fi
+            if [ "${countmnt}" -ne "${countdisk}" ] && [ "${checkbind}" -eq '0' ]; then
+              printf "\33[01;32mCTRL+C pour quitter\33[0;0m\n\n"
+              printf "[EXPORTATION]\n\n\33[01;31m[1]\33[0;0mLinux\n\33[01;31m[2]\33[0;0mwindows\n\n"
+	      read -p "Tapez le numéro: " -sn 1 OS
+	     
+            fi
+	    clear
+	    case $OS in
+			    1) printf "\33[01;31mlinux va être exporté\33[0;0m\n\n";;
+			    2) printf "\33[01;31mWindows va être exporté\33[0;0m\n\n";;
+			    *) printf "Rien à exporter\n" && exit 1
+		    ;;
+		    esac
+    	      read -p "Continuer ? [O/n] " -sn 1 rep
+	      Continuecase
+   case $OS in 
+       1) #linux
+         UPcount="$(ip -br a |grep -c UP )" ;\
+         sysDpath="/etc/systemd/system/srv-nfs-${myservername}-linux"
+         unitname="srv-nfs-${myservername}-linux"
+             [ $UPcount -eq '1' ] ;case "$?" in
+              0)#Prendre la seule IP active
+                 IP="$( ip -br a |grep UP |nl |sed -r 's_^ *([0-9])_\1_' |awk '{print $4}' )"
+		 nocidr="$(echo "${IP}" |sed -r 's+/.*++')"
+                 NET="$(ip -br a |grep UP |nl |sed -r 's_^ *([0-9])_\1_' |awk '{print $4}' |cut -d '.' -f '1-3' |sed  's/$/.0\/24/')"
+                 hostIP="$(ip -br a |grep UP |nl |sed -r 's_^ *([0-9])_\1_' |awk '{print $4}' |cut -d '.' -f '4' |sed 's/\/24/ /')"
+              ;;
+              1)#CHOISIR PARMI LES IP ACTIVES
+		 reseaux_actifs
+	    	 clear
+            	   if [[ "${num}" =~ [[:digit:]] ]] && [ "${num}" -gt '0' ] && [ "${num}" -le "${UPcount}" ]; then
+            	      IP="$(ip -br a |grep UP |sed -n "${num}"p  |awk '{print $3}' )"
+	    	      nocidr="$(echo "${IP}" |sed -r 's+/.*++')"
+            	      hostIP="$(ip -br a |grep UP |sed -n "${num}"p |awk '{print $3}' |cut -d '.' -f '4' |sed 's/\/24/ /')"
+            	      NET="$(ip -br a |grep UP |sed -n "${num}"p |awk '{print $3}' |cut -d '.' -f '1-3' |sed 's/$/.0\/24/')"
+            	   else 
+            	       printf "\33[01;31m\'${num}\' n'est pas compris entre le choix 1 et ${UPcount}\33[0;0m\n\n"
+            	       exit 1
+            	   fi
+              ;;
+              esac
+	 host="$(hostnamectl |awk '/host/ {print $3}')"
+         exports1="/srv/nfs $NET(rw,fsid=0,no_root_squash,no_subtree_check)" ;\
+         exports2="/srv/nfs/$myservername $NET(rw,all_squash,anongid=1010,no_subtree_check)" ;\
+         exports3="/srv/nfs/$myservername/linux $NET(rw,all_squash,anongid=1010,no_subtree_check)" ;\
+         sysDpath="/etc/systemd/system/srv-nfs-$myservername-linux"
+         unitname="srv-nfs-${myservername}-linux"
+         Where="/srv/nfs/$myservername/linux"
+	 What="/home/${myservername}"
+	 if [ -n ${host} ]; then
+	   echo "$host" > ${What}/.chez_hostname
+	   chown ${myservername}:${myservername} ${What}/.chez_hostname
+	   setfacl -m g:\1010:rw ${What}/.chez_hostname
+	 fi
+          if ! [ -f ${sysDpath}.mount ]; then
+            printf "[\33[01;32m OK \33[0;0m] Création des units\n";\
+            printf "[Unit]\nDescription=Bind home\n\n[Mount]\nWhat=${What}\nWhere=${Where}\nType=none\nOptions=bind\n\n[Install]\nWantedBy=multi-user.target\n" > "${sysDpath}.mount" ;\
+            printf "[Unit]\nDescription=Automount bind home\n\n[Automount]\nWhere=$Where\n\n[Install]\nWantedBy=multi-user.target\n" > "${sysDpath}.automount" ;\
+            systemctl -q daemon-reload ;\
+            systemctl -q start ${unitname}.automount;\
+            systemctl -q enable ${unitname}.automount;\
+          fi
+            if ! grep -xq "${exports1}" /etc/exports ;then
+              echo "${exports1}" >>/etc/exports ;\
+            fi
+              if ! grep -xq "${exports2}" /etc/exports ;then
+                echo "${exports2}" >>/etc/exports ;\
+              fi
+                if ! grep -xq "${exports3}" /etc/exports ;then
+                     echo "${exports3}" >>/etc/exports ;\
+                     exportfs -ar ;\
+                     printf "\n\tNotez le dernier chiffre\33[1;31m ${hostIP}\33[0;0m de votre IP ${nocidr} pour les clients\n\n"
+                else
+                     exportfs -ar
+                     printf "[\33[01;32m OK\33[0;0m ] Ce point de montage existe déja dans /etc/exports\n\n"
+                     printf "Notez le dernier chiffre\33[1;31m ${hostIP} \33[0;0m de votre ip ${nocidr} pour les clients\33[0;0m\n\n"
+                fi
+#		virtualbox
+		  ;;
+       2) #windows
+	       read -p "Vérifier les partitions windows? [O/n] " -sn 1 rep
+	       clear
+	       case $rep in 
+	       o|O) namedevs="$(fdisk -l |egrep -i '(ntfs|microsoft)' |awk '{print $1}')"
+	       declare -a namedevwin=($namedevs)
+	       for i in ${namedevwin[@]}; do
+	           ntfsfix $i
+	       done
+	       echo ''
+	       read -p "Continuer? [O/n] ? " -sn 1 rep
+	       Continuecase
+	       ;;
+       	       *) printf "Annulé\n";;
+       esac
+	   clear
+	 disk="$(fdisk -l |egrep -i '(ntfs|microsoft)' | sort |sed -re 's+(\b[[:digit:]]{1,} ){1,3}++g' -e 's/(.*)(\*)(.*)/\1\3 \2/' -e 's+\*+boot+' |awk '{print $1, $2, $4}' |column -t)"
+         verifchoice="$(fdisk -l |egrep -i '(ntfs|microsoft)' |sort |awk '{print $1}')"
+	 devmnt="$(mount |grep -v 'systemd' |grep -v linux |grep /srv/nfs/${myservername}/ |awk '{print $1, $3}' |cut -d '/' -f '1-3,7' |sed 's/\/w/w/' |column -t)"
+         countmnt="$(mount |egrep -v "(^/dev/fuse|linux)" |egrep -c '^/d.* /.*/.*/')"
+         mnt="$(mount |grep -v 'systemd' |grep -v linux |grep /srv/nfs/${myservername}/)"
+         countdisk="$(fdisk -l |egrep -ci '(ntfs|microsoft)')"
+         network="$(showmount -e --no-header |awk '{print $2}' |uniq)"
+	 countshowmnt="$(showmount -e  |sed 's: .*::' |grep -v linux |egrep -c '(/.*){4}')"
+             if [ "${countdisk}" -eq '0' ]; then
+                 printf "Aucune partition windows détectée\n\n"
+                 exit 1
+             elif [ "${countmnt}" -eq "${countdisk}" ] && [ "${countshowmnt}"  -eq "${countdisk}" ]; then
+                 printf "[\33[01;32m OK\33[0;0m ] Windows Unit files exist\n";\
+                 printf "[\33[01;32m OK\33[0;0m ] Fichier /etc/exports déjà configuré\n\n";\
+                 printf "windows déjà exporté\33[01;31m\n${devmnt}\33[0;0m\n\nRéseau ${network}\n"
+                 exit 1
+             fi
+         testmnt="$(mount |grep -v linux |grep  /srv/nfs/${myservername}/)"
+         checkmnt="$(mount |egrep -v "(^/dev/fuse|linux)" |egrep -c '^/d.* /.*/.*/' |awk '{print $1}')"
+               if [ "${countdisk}" -eq '1' ]; then
+                 dev="${verifchoice}"
+	 	 label="$(blkid |awk -F"=" '/LABEL.*ntfs/ {print $2}' |sed -re 's+"(.*)".*+\1_+' -e 's+ +_+g')"
+		 if [ -n "${label}" ]; then
+		     win12="${label}"
+	         else
+		     win12="windows"
+		     read -p "Cette partition s'appelera $win12, voulez vous la changer? [O/n] " -sn 1 rep
+		     clear
+		     case $rep in 
+			   o|O) clear
+			       declare -a samelabel=($label)
+        		       printf "\33[1;32mCTRL+C POUR QUITTER\33[0;00m\n\n"
+		               read -p "Taper le nouveau nom de $dev: " nom
+		               ntfslabel -fq ${dev} $(echo $nom |sed 's+ +_+g') &>/dev/null
+			       label="$(blkid |grep $(echo $dev) |sed -r 's:.*"(.*)" U.*:\1:')"
+		               win12="${label}"
+			       clear
+			     ;;
+			     *);;
+		     esac
+		 fi
+	       fi
+  labelrename () {
+      label="$(blkid |sort |awk -F"\"" '/LABEL.*ntfs/ {print $2}' |sed 's+ +_+g')"
+      labelused="$(blkid |awk -F"\"" '/LABEL.*ntfs/ {print $1, $2}' |sed 's/ L.*=//')"
+      case $rep in
+            o|O) Y='0' && N='1'
+                 declare -a samelabel=($label)
+                 while [ "$Y" -ne "${#samelabel[@]}" ]; do
+		      clear
+		      printf "\33[1;32mCTRL+C POUR QUITTER\33[0;00m\n\n"
+		      printf "\33[01;31mLes noms déjà pris:\33[0;0m\n"
+		      printf "$labelused\n\n"
+                      read -p "Taper le nouveau nom de $dev: " nom
+                      for i in ${samelabel[@]}; do
+                         if [ "$i" == "$(echo $nom |sed 's+ +_+g')" ]; then
+		             clear
+		             printf "\33[1;32mCTRL+C POUR QUITTER\33[0;00m\n\n"
+		             printf "\33[01;31mLes noms déjà pris:\33[0;0m\n"
+		             printf "$labelused\n\n"
+		             printf "Taper le nouveau nom de $dev:\33[01;31m $nom est déjà pris\33[0;0m\n"
+		             sleep 1
+		         else
+		             Y=$(( $Y + 1 ))
+                         fi
+		           if [ "$N" -eq "${#samelabel[@]}" ] && [ "$Y" -eq "${#samelabel[@]}" ]; then
+		               break
+		           elif [ "$N" -eq "${#samelabel[@]}" ]; then
+		               Y='0'
+		               N='1'
+		           else
+		               N=$(( $N + 1 ))
+			   fi
+                    done
+                done
+                    ntfslabel -fq ${dev} $(echo $nom |sed 's+ +_+g')
+		    label="$(blkid |grep $(echo $dev) |sed -r 's:.*"(.*)" U.*:\1:')"
+      	     	    win12="${label}"
+		    clear
+	      ;;
+	      n|N);;
+	        *) printf "Choix \'${rep}\' inconnu" && exit 1 ;;
+      esac
+  }
+
+                 if [ "${countdisk}" -ge '2' ]; then
+		   if [ "${countmnt}" -ne '0' ]; then
+         	     onedev="$(mount |egrep -v "(^/dev/fuse|linux)" |egrep '^/d.* /.*/.*/' |awk '{print $1}' |column |tr '\t' '|')"
+         	     diskinverse="$(fdisk -l |egrep -i '(ntfs|microsoft)' |sort |egrep -v "(${onedev})" |awk '{print $1}')"
+         	     diskline="$(fdisk -l |egrep -i '(ntfs|microsoft)' |sort |nl |egrep -v "(${onedev})" |sed -r 's_^ *([0-9]).*_\1_')"
+	 	     labeline="$(blkid |grep -i "label.*ntfs" |sort |nl |egrep -v "(${onedev})" |sed -re 's_^ *([0-9]).*_\1_' -e 's+ +_+g')"
+		     label="$(blkid |egrep -v "(${onedev})" |sort |awk -F"\"" '/LABEL.*ntfs/ {print $2}' |sed 's+ +_+g')"
+		     if [ -z "${label}" ]; then
+		         win12="windows${labeline}"
+	       	     else
+			 win12="${label}"
+		     fi
+		     osmnt="$(mount |egrep -v "(^/dev/fuse|linux)" |egrep '^/d.* /.*/.*/' |sed 's+/+ +6' |awk '{print $1, $4}' |column -t |sort)"
+		     net="$(showmount -e --no-headers |awk '{print $2}' |uniq)"
+		     N='0'
+		     IFS=$'\n'
+		     os=($osmnt)
+		     printf "\33[1;32mCTRL+C POUR QUITTER\33[0;00m\n\n"
+		     printf "Partition déjà exporté:\n"
+		     printf "$net\n"
+       	  	       for a in ${os[@]}; do
+			   printf "\33[01;31m${a}\33[0;0m\n"
+       	  	           N=$(( $N + 1 ))
+          	       done
+       	  	           if [ "${countdisk}" -eq "$(( "${countmnt}" + 1 ))" ] && [ -n "${label}" ];then
+       	  	             printf "\n\nLa dernière partition $win12 \33[01;32m${diskinverse}\33[0;0m va être exportée\n\n"
+    	      		     read -p "Continuer ? [O/n] " -sn 1 rep
+			     Continuecase
+       	  	           fi
+          	   fi
+		     if [ "${countmnt}" -eq '0' ]; then
+         	       onedev="$(mount |egrep -v "(^/dev/fuse|linux)" |egrep '^/d.* /.*/.*/' |awk '{print $1}' |column |tr '\t' '|')"
+         	       diskinverse="$(fdisk -l |egrep -i '(ntfs|microsoft)' |sort |awk '{print $1}')"
+         	       diskline="$(fdisk -l |egrep -i '(ntfs|microsoft)' |sort |nl |sed -r 's_^ *([0-9]).*_\1_')"
+	 	       labeline="$(blkid |grep ntfs |sort |nl |sed -re 's_^ *([0-9]).*_\1_' -e 's+ +_+g')"
+		       label="$(blkid |grep -i 'label.*ntfs' |sed -r 's:.*L="(.*)" U.*:\1:')"
+		     fi
+       	               if [ "${countmnt}" -eq "$(( "${countdisk}" - 1 ))" ]; then
+                         dev="${diskinverse}"
+       	                 if [ -z "${label}" ]; then
+       	                   win12="windows${diskline}"
+			   echo ''
+			   read -p "Renommage de ${win12} ${dev} ? [O/n] " -sn 1 rep
+			   clear
+	                   labelrename
+       	                 fi
+                       fi
+                   countdisk="$(fdisk -l |egrep -ci '(ntfs|microsoft)')"
+                   countmnt="$(mount |egrep -v "(^/dev/fuse|linux)" |egrep -c '^/d.* /.*/.*/')"
+                   mntless="$(mount |egrep -v "(^/dev/fuse|linux)" |egrep '^/d.* /.*/.*/' |awk '{print $1}' |tr '\n' '|' |sed 's/|$//')"
+                   alreadymnt="$(mount |grep -v linux |egrep '^/d.* /s' |awk '{print $1" "$3}' |sed 's+/+ +6' |awk '{print $1" "$3}' |sort)"
+                   disk="$(fdisk -l |egrep -i '(ntfs|microsoft)' |sort |sed -re 's+(\b[[:digit:]]{1,} ){1,3}++g' -e 's/(.*)(\*)(.*)/\1\3 \2/' -e 's+\*+boot+' |awk '{print $1, $2, $4}' |sed 's/ de$//' |column -t)"
+		 fi
+
+               if [ "${countmnt}" -ne "$(( "${countdisk}" - 1 ))" ];then
+                 IFS=$'\n'
+                 blkidwin="$(blkid |grep -i ntfs |sort |awk -F"\"" '{print $1,$2}')"
+                 blkidlabel="$(blkid |grep -i '.*label.*ntfs.*' |sort |awk -F"\"" '{print $1,$2}' |sed -re 's/^(.*):.*=/\1/' -e 's/ /_/g' -e 's/_/ /1')"
+                 declare -a readymnt=($alreadymnt)
+                 declare -a blkwin=($blkidwin)
+                 declare -a label=($blkidlabel)
+                 printf "\nPartitions windows:\n"
+		 N='1'
+                 if [ "${#readymnt[@]}" -eq '0' ]; then
+		      for i in "${!blkwin[@]}"; do
+			 dsk="$(echo ${blkwin[$i]%%: *})"
+			 label="$(echo ${blkwin[$i]#*= })"
+       		         if echo ${blkwin[$i]} |grep -q LABEL; then
+			     printf "\33[01;31m[$N]\33[0;0m${label} \\t${dsk}\n" 
+       	                 else
+                             printf "\33[01;31m[$N]\33[0;0mwindows$N\\t${dsk}\n" 
+       		         fi
+	                 N=$(( $N + 1 ))
+		     done
+                 else
+	                 for d in ${!blkwin[@]}; do
+	                    y='0'
+	                        for m in ${readymnt[@]}; do
+	                           if [ "${m%% *}" == "${blkwin[$d]%%: *}" ]; then
+	                             y=$(( $y + 1 ))
+	                           fi
+	                    done
+       	                        W=$(( $d + 1 ))
+	                        if [ -n "$y" ] && [ "$y" -ne "1" ]; then
+			          dsk="$(echo ${blkwin[$d]%%: *})"
+			 	  label="$(echo ${blkwin[$d]#*= })"
+				  if echo ${blkwin[$d]} |grep -q LABEL; then
+	                               printf "\33[01;31m[$N]\33[0;0m${label} \\t${dsk}\n"
+	                           else
+	                               printf "\33[01;31m[$N]\33[0;0mwindows$W\\t${blkwin[$d]%%: *}\n"
+	                           fi
+	                          N=$(( $N + 1 ))
+	                        fi
+	             done
+	         fi
+   echo ''
+           read -p "Tapez le numéro de la ligne à exporter:" -sn 1 rep ;\
+   echo '' 
+   clear
+                   if [ -n "${rep}" ] && [[ "${rep}" =~ [[:digit:]] ]] && [ "${rep}" -ne '0' ] && [ "${rep}" -le "${countdisk}" ];then
+		       continue
+		   else
+                       printf "\33[01;31m\'${rep}\' Résultat inconnu\33[0;0m\n\n"
+                       exit 1
+	           fi
+		   mntless="$(mount |grep -v ^systemd |grep -v 'linux' |egrep '^/d.* /s' |awk '{print $1}' |tr '\n' '|' |sed 's/|$//')"
+	 	   disk="$(fdisk -l |egrep -i '(ntfs|microsoft)' |sort |sed -re 's+(\b[[:digit:]]{1,} ){1,3}++g' -e 's/(.*)(\*)(.*)/\1\3 \2/' -e 's+\*+boot+' |awk '{print $1, $2, $4}' |column -t)"
+         	   alreadymnt="$(mount |grep -v linux |egrep '^/d.* /s' |awk '{print $1" "$3}' |sed 's+/+ +6' |awk '{print $1" "$3}' |sort)"
+		     declare -a readymnt=($alreadymnt)
+       	             if [ "${#readymnt[@]}" -eq '0' ]; then
+		         label="$(blkid |sort |awk -F"\"" '/LABEL.*ntfs/ {print $2}' |sed 's+ +_+g')"
+       	                 dev="$(fdisk -l |egrep -i '(ntfs|microsoft)' |sort |nl |egrep "^[[:blank:]]*${rep}" |awk '{print $2}')"
+			 labeline="$(blkid |grep ntfs |sort |nl |egrep -i "^[[:blank:]]*${rep}.*label.*" |awk -F"=" '/ntfs/ {print $2}' |sed -re 's+"(.*)".*+\1_+' -e 's+ +_+g' -e 's+_$++')"
+
+			  if [ -n "${labeline}" ]; then
+                              win12="${labeline}"
+			 labeline="$(blkid |grep ntfs |egrep -v "($mntless)"|nl |egrep -i "^[[:blank:]]*${rep}.*label.*" |awk -F"=" '/ntfs/ {print $2}' |sed -re 's+"(.*)".*+\1_+' -e 's+ +_+g' -e 's+_$++')"
+		    	  else
+			      win12="windows${rep}"
+			      read -p "Renommage de ${win12} ? [O/n] " -sn 1 rep
+			      clear
+			      labelrename
+			  fi
+       	             else
+			 dev="$(blkid |grep ntfs |egrep -v "($mntless)" |sort |nl |egrep -i "^[[:blank:]]*${rep}" |awk -F"\\t|:" '{print $2}')"
+			 labeline="$(blkid |grep ntfs |egrep -v "($mntless)" |sort |nl |egrep -i "^[[:blank:]]*${rep}.*label.*" |awk -F"=" '{print $2}' |sed -re 's+ +_+g' -e 's+"(.*)".*+\1+')"
+			  if [ -n "${labeline}" ]; then
+			      win12="${labeline}"
+		     	  else     
+			      win="$(fdisk -l |egrep -i '(ntfs|microsoft)' |sort |nl |egrep "($dev)" |awk '{print $1}')"
+			      win12="windows${win}"
+			      read -p "Renommage de ${win12}? [O/n] " -sn 1 rep
+			      clear
+			      labelrename
+			  fi
+	             fi
+                         if [ "${win12}" == "windows1" ];then
+                           win12="windows"
+                         fi
+      fi
+         UPcount="$(ip -br a |grep -c UP )"
+         [ ${UPcount} -eq '1' ] ;case "$?" in
+         0)#Prendre la seule IP active
+           UPdisplay="$(ip -br a |grep UP |awk '{print $1"  "$3}' |column -t)" ;\
+           IP="$( ip -br a |grep UP |nl |sed -r 's_^ *([0-9])_\1_' |awk '{print $4}' )" ;\
+	   nocidr="$(echo "${IP}" |sed -r 's+/.*++')"
+           NET="$(ip -br a |grep UP |nl |sed -r 's_^ *([0-9])_\1_' |awk '{print $4}' |cut -d '.' -f '1-3' |sed  's/$/.0\/24/')" ;\
+           hostIP="$(ip -br a |grep UP |nl |sed -r 's_^ *([0-9])_\1_' |awk '{print $4}' |cut -d '.' -f '4' |sed 's/\/24/ /')" ;\
+           devmnt="$(mount |egrep -v 'systemd|linux' |grep /srv/nfs/${myservername}/ |awk '{print $1}')"
+           mntpath="/srv/nfs/${myservername}/${win12} "
+           checkmnt="$(mount |grep -v 'systemd' |grep -q  ${mntpath})"
+         ;;
+         1)#CHOISIR PARMI LES IP ACTIVES
+           UPcount="$(ip -br a |grep -c UP )"
+           countwin="$(mount |egrep -v 'systemd|linux' |grep -c /srv/nfs/${myservername}/windows)"
+           countdisk="$(fdisk -l |egrep -ci '(ntfs|microsoft)')"
+           countmnt="$(mount |egrep -v 'linux|systemd' |grep -c /srv/nfs/${myservername}/)"
+	   reseaux_actifs
+               if  [ -n "${num}" ] && [[ "${num}" =~ [[:digit:]] ]] && [ "${num}" -ne '0' ] && [ "${num}" -le "${UPcount}" ]; then
+	           continue
+	       else
+                   printf "Numéro de la ligne seulement\n\n"
+                   exit 1
+	       fi
+           IP="$(ip -br a |grep UP |nl |sed -r 's_^ *([0-9])_\1_' |egrep "^[${num}]{1}" |awk '{print $4}' )"
+           nocidr="$(ip -br a |grep UP |nl |sed -r 's_^ *([0-9])_\1_' |egrep "^[${num}]{1}" |awk '{print $4}' |sed 's_/24__' )"
+           hostIP="$(ip -br a |grep UP |nl |sed -r 's_^ *([0-9])_\1_' |egrep "^[${num}]{1}" |awk '{print $4}' |cut -d '.' -f '4' |sed 's/\/24/ /')"
+           NET="$(ip -br a |grep UP |nl |sed -r 's_^ *([0-9])_\1_' |egrep "^[${num}]{1}" |awk '{print $4}' |cut -d '.' -f '1-3' |sed 's/$/.0\/24/')"
+           mntpath="/srv/nfs/${myservername}/${win12} "
+           Where="/srv/nfs/${myservername}/${win12}"
+	   What="${dev}"
+	   unitname="$(systemd-escape srv/nfs/${myservername}/${win12})"
+         ;;
+			         esac
+             if  [ -e "${dev}" ] && [ "${devmnt}" != "${dev}" ]; then
+               printf "[ \33[01;32mOK\33[0;0m ] "${dev}" renomé ${win12}\n"
+               Where="/srv/nfs/${myservername}/${win12}"
+	       unitname="$(systemd-escape srv/nfs/${myservername}/${win12})"
+	       What="${dev}"
+               sysDpath="/etc/systemd/system/$unitname"
+               mntpath="/$unitname"
+             fi
+           exports1="/srv/nfs $NET(rw,fsid=0,no_root_squash,no_subtree_check)" ;\
+           exports2="/srv/nfs/$myservername $NET(rw,all_squash,anongid=1010,no_subtree_check)" ;\
+           exports3="/srv/nfs/$myservername/$win12 $NET(rw,all_squash,anonuid=1000,anongid=1010,no_subtree_check)" ;\
+           printf "[\33[01;32m OK\33[0;0m ] Présence de /srv/nfs/${myservername}/${win12}\n" ;\
+               if ! [ -f ${sysDpath}.mount ] && ! [ -f ${sysDpath}.automount ]; then
+                 printf "[UNIT]\nDescription=Windows mount\n\n[Mount]\nWhat=${dev}\nWhere=${Where}\nOptions=\nType=ntfs-3g\n\n[Install]\nWantedBy=multi-user.target\n" >${sysDpath}.mount ;\
+                 printf "[UNIT]\nDescription=Windows automount\n\n[Automount]\nWhere=${Where}\n\n[Install]\nWantedBy=multi-user.target\n" > ${sysDpath}.automount ;\
+                 systemctl -q daemon-reload ;\
+                 systemctl -q start "${unitname}.automount"
+                 systemctl -q enable "${unitname}.automount"
+               fi
+
+	        host="$(hostnamectl |awk '/host/ {print $3}')"
+	        if [ -n ${host} ]; then
+	          echo "$host" > ${Where}/.chez_hostname
+	        fi
+           	   if ! grep -xq "${exports1}" /etc/exports ;then
+           	     echo "${exports1}" >>/etc/exports ;\
+           	   fi
+           	     if ! grep -xq "${exports2}" /etc/exports ;then
+           	       echo "${exports2}" >>/etc/exports ;\
+           	     fi
+           	       if ! grep -xq "${exports3}" /etc/exports ;then
+           	           echo "${exports3}" >>/etc/exports ;\
+           	           exportfs -ar ;\
+           	           systemctl -q daemon-reload ;\
+           	           printf "[\33[01;32m OK\33[0;0m ] Exportation configuration /etc/exports\n";\
+           	       else
+           	           exportfs -ar
+           	           systemctl -q daemon-reload ;\
+           	       fi
+           	  	 if [ -f ${sysDpath}.mount ] && [ -f ${sysDpath}.automount ]; then
+           	  	   printf "[\33[01;32m OK\33[0;0m ] Création de ${win12}.mount et ${win12}.automount\n\n"
+           	  	   printf "Notez le chiffre\33[1;31m ${hostIP}\33[0;0m de votre ip ${nocidr} pour l'autre PC (client)\33[0;0m\n\n" ;\
+           	  	 fi
+	;;
+        esac
+  if [ "$(showmount -e |wc -l)" -lt '5' ]; then
+    if [ -f '/etc/default/nfs-common' ];then
+        if ! egrep -x '32765|32766' /etc/default/nfs-common; then
+          sed -i -r 's/^(S.*=).*/\1"--port 32765 --outgoing-port 32766"/' /etc/default/nfs-common
+          printf "[\33[01;32m OK\33[0;0m ] Configuration de ports 32765 et 32766 client dans /etc/default/nfs-common\n"
+        fi
+    else
+        printf "STATDOPTS="--port 32765 --outgoing-port 32766"\n" > /etc/default/nfs-common
+        printf "\tCréation fichier /etc/default/nfs-common\n"
+    fi
+      if [ -f '/etc/default/nfs-kernel-server' ]; then
+          if ! grep -x ' 32767' /etc/default/nfs-kernel-server; then
+            sed -i -r 's/^(R.*M.*=).*/\1"-p 32767"/' /etc/default/nfs-kernel-server
+            printf "[\33[01;32m OK\33[0;0m ] Configuration de port 32767 dans /etc/default/nfs-kernel-serveur\n"
+          fi
+      else
+          printf "RPCNFSDCOUNT=8\nRPCNFSDPRIORITY=0\nRPCMOUNTDOPTS="-p 32767"\n" >/etc/default/nfs-kernel-server
+          printf "\tCréation fichier /etc/default/nfs-kernel-server\n"
+      fi
+    printf "#créé avec http://wiki.debian.org/SecuringNFS\nfs.nfs.nfs_callback_tcpport= 32764\nfs.nfs.nlm_tcpport= 32768\nfs.nfs.nlm_udpport= 32769\n" > /etc/sysctl.d/papa-nfs-static-ports.conf
+    printf "#créé avec http://wiki.debian.org/SecuringNFS\noptions lockd nlm_udpport=32769 nlm_tcpport=32768\noptions nfs callback_tcpport=32764\n" > /etc/modprobe.d/papa-nfs.conf
+    printf "#J'ai créé ce fichier http://wiki.debian.org/SecuringNFS\nRPCQUOTADOPTS=\"-p 32769\"\n" >/etc/default/quota
+    printf "\tCréation de /etc/modprobe.d/papa.conf\n"
+    printf "\tCréation de /etc/sysctl.d/papa-nfs-static-ports.conf\n"
+    printf "\tCréation de /etc/default/quota\n"
+    sysctl -q --system &>/dev/null
+    systemctl -q restart nfs-kernel-server &>/dev/null
+        if systemctl -q is-enabled ufw &>/dev/null; then
+  	  printf "\tDetection de ufw mode actif\n"
+              if [ -f '/etc/ufw/applications.d/ufw-fileserver' ]; then
+                if grep -qw '^\[NFS\]' /etc/ufw/applications.d/ufw-fileserver; then
+    	          sed -i '/^\[NFS\]/,/^$/s/^[^#]/#&/' /etc/ufw/applications.d/ufw-fileserver
+		fi
+	      fi
+            printf "[NFS]\ntitle=NFS server\ndescription=NFS and portmap server. Will also need access to mountd, statd and possibly others\nports=2049,111/tcp|2049,111/udp|32764:32769/tcp|32764:32769/udp\n" > /etc/ufw/applications.d/ufw-papa
+	      ufw enable &>/dev/null
+              ufw app update ufw-papa
+              ufw allow from ${NET} to ${nocidr} app NFS &>/dev/null
+              printf "[\33[01;32m OK\33[0;0m ] Création et activation du fichier /etc/ufw/applications.d/ufw-papa\n"
+              printf "[\33[01;32m OK\33[0;0m ] Configuration de ufw (uncomplicated firewall)\n\n"
+      elif ! apt-cache policy iptables |egrep -q "(aucun|none)"; then
+  	      if [ "$(iptables -L |wc -l)" -eq '8' ] && ! iptables -L |grep -q NFS; then
+                  iptables -I INPUT 1 -p tcp -m multiport --dports 111,2049 -d ${nocidr} -s ${NET} -j ACCEPT -m comment --comment 'app_NFS'
+                  iptables -I INPUT 2 -p udp -m multiport --dports 111,2049 -d ${nocidr} -s ${NET} -j ACCEPT -m comment --comment 'app_NFS'
+                  iptables -I INPUT 3 -p tcp -m multiport --dports 32764:32769 -d ${nocidr} -s ${NET} -j ACCEPT -m comment --comment 'app_NFS'
+                  iptables -I INPUT 4 -p udp -m multiport --dports 32764:32769 -d ${nocidr} -s ${NET} -j ACCEPT -m comment --comment 'app_NFS'
+                  printf "[\33[01;32m OK\33[0;0m ] Configuration de iptables\n\n" 
+  	         if [ -d '/etc/iptables/' ]; then
+  	             iptables-save -f /etc/iptables/rules.v4
+  	             printf "Nouvelle configuration iptables.\n"
+  	             printf "Nouvelle config dans /etc/iptables/rules.v4, à persister.\n" 
+  	             printf "Au prochain reboot, verifier la config.\n\n"
+                         else 
+  	             iptables-save -f /home/${myservername}/${bureau}/iptables.rules
+  	             printf "Nouvelle configuration iptables\n"
+  	             printf "Fichier iptables.rules sur le bureau, à persister\n" 
+  	             printf "Au prochain reboot, iptables effacera cette conf\n\n"
+  	         fi
+	      fi
+        else
+    	    printf "Firewall ufw et iptables sont absents\n\33[01;32mSi vous avez un Firewall\33[0;0m:"
+    	    printf "\nAutorisez ports de destination tcp/udp 111,2049 et de 32764 à 32769\n"
+    	    print "de votre réseau local (ex: 192.168.X.0/24) à entrer sur votre PC\n"
+        fi
+  fi
+;;
+2) #CLIENT IMPORTATION
+
+    if apt-cache policy nfs-common |egrep -q "(none|aucun)"; then
+      printf "\33[01;31mVeuillez installer NFS-common\33[0;0m\n\n"
+      read -p "Installer ? [O/n] " -sn 1 rep
+      clear
+        case $rep in
+            o|O) apt-get update && apt-get install -y nfs-common && clear ;;
+            n|N) printf "Annuler\n" && exit 0 ;;
+            *) printf "Choix \'$rep\' inconnu\n" && exit 1;;
+        esac
+    fi
+  addNFSgroup
+  checkimport="$(mount |grep -v 'n /s' |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |cut -d '/' -f '1,4,5' |tr ':/' ' ' |awk '{print "IP: "$1" de "$2" donne "$3"  "}' |uniq |column -t |sort)"
+  checkimportIP="$(mount |grep -v 'n /s' |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |cut -d '/' -f '1,4,5' |tr ':/' ' ' |awk '{print $1}' |uniq |wc -l)"
+      showalreadyimport () {
+	clear
+    if [ "${checkimportIP}" -ge '1' ]; then
+        printf "\33[1;32mCTRL+C POUR QUITTER\33[0;00m\n\n"
+        printf "[IMPORTATION D'UN SERVEUR]\n\n\n"
+        printf "Serveur actuellement sur le bureau:\n"
+        var="${checkimport}"
+        IFS=$'\n'
+        set "${var}"
+          for i in $@ ;do
+            printf "\33[01;31m$i\33[0;0m\n"
+          done
+    else
+        printf "\33[1;32mCTRL+C POUR QUITTER\33[0;00m\n\n"
+    fi
+    echo ''
+}
+showalreadyimport
+
+	  copyhostname () {
+      partition="$(showmount -e ${srvIP} |sed 's/ .*//' |egrep "(.*/){4}" |head -n 1)"
+      mount -t nfs ${srvIP}:${partition} /mnt
+      cp /mnt/.chez_hostname /home/${prenom_client}/
+        if [ -f "/home/${prenom_client}/.chez_hostname" ]; then
+          umount /mnt
+        fi
+	  if mount |grep 'nfs.*/mnt '; then
+            umount /mnt
+	  fi
+
+}
+
+          asksrvIP () {
+          printf "\nVotre IP:${IP}\n\n" ;\
+          printf "Quelle est l'adresse IP du serveur (l'autre PC)\n" ;\
+          printf "Completez la fin \33[01;32m"
+          read -p "$IPcut"  IPend
+            if  [ -n "${IPend}" ] && [ "${IPend}" -ne '0' ] && [ "${IPend}" -le "254" ] && [[ "${IPend}" =~ ^[[:digit:]]*$ ]]; then
+          	  srvIP="${IPcut}${IPend}"
+            else
+                clear;\
+                printf "\33[01;31m\'${IPend}\' n'est pas compris entre 1 et 254\33[0;0m\n"
+                exit 1
+            fi
+              if [ "${srvIP}" == "${IP}" ]; then
+                  printf "\n\33[01;31mNe marquez pas l'ip de votre PC\33[0;0m\n\n"
+                  exit 1
+              fi
+	  timeout 2s showmount -e ${srvIP} &>/dev/null
+	  if [ "$?" -eq '124' ]; then
+	    printf "Impossible de contacter le serveur\n"
+		  exit 1
+	  fi
+        copyhostname
+	hostnamefile="$(cat /home/${prenom_client}/.chez_hostname)"
+   	  srvname="$(showmount -e ${srvIP} |sed 's: .*$::' |awk -F"/| " '{print $4}' |uniq |sed '/^$/d')"
+   	  shosname="$(showmount -e ${srvIP} |sed 's: .*$::' |awk -F'/| ' '{print $5}' |sort |sed '/^$/d')"
+          checkimportIP="$(mount |grep -v 'n /s' |grep ^${srvIP}.*chez |cut -d ':' -f '1' |uniq)"
+          checkimport="$(mount |grep "n /s" |egrep ^${srvIP}.*chez |cut -d '/' -f '1,4,5' |tr ':/' ' ' |awk '{print $2": "$1" donne déjà "$3}' |uniq)"
+  	  nushmnt="$(showmount -e ${srvIP} --no-header |sed -e 's/ .*//' -e 's/\// /g' |awk '{print $4}' |sed '/^$/d' |wc -l)"
+  	  numnt="$(mount |grep -v 'n /s' |egrep -c ^${srvIP}.*chez)"
+  	  lessmnt="$(mount |grep -v 'n /s' |grep ^$srvIP |tr '/' ' ' |awk '{print $5}' |uniq |tr '\n' '|' |sed 's+|$++')"
+  	  nulesshow="$(showmount -e ${srvIP} --no-header |sed -e 's/ .*//' -e 's/\// /g' |awk '{print $4}' |sed '/^$/d' |sort |egrep -wv "($lessmnt)" |wc -l)"
+  	  lesshow="$(showmount -e ${srvIP}  |sort  |sed 's: .*$::' |awk -F'/| ' '{print $5}' |sed '/^$/d' |egrep -wv "($lessmnt)")"
+	  if [ -n "${srvname}" ]; then
+	        if ! grep -q '# NFS' /etc/hosts; then
+	            sed -i 1i\ "# NFS\n${srvIP}\t${srvname}@${hostnamefile}\n# END NFS\n" /etc/hosts
+	        else
+	            if ! grep "${srvname}" /etc/hosts |grep -q "${srvIP}"; then
+	              sed -i "/# END NFS/i\\${srvIP}\t${srvname}@${hostnamefile}" /etc/hosts
+	            fi
+	        fi
+	  fi
+      }
+
+	  hosts () {
+            if ! grep -q '# NFS' /etc/hosts; then
+      	      asksrvIP
+            fi
+  	        if [ -z "${srvIP}" ] && grep -q '# NFS' /etc/hosts; then
+	  	  showalreadyimport
+  	          printf "\nIMPORTATION SERVEUR CONNU\n"
+  	          N='1'
+  	          IFS=$'\n'
+  	          hostlist="$(cat /etc/hosts |awk '{print $1" "$2}' |egrep -v "(127|:|ff|#|^ )" |awk '{print $2" "$1}')"
+  	          declare -a host=($hostlist)
+  	            for i in ${host[@]}; do
+  	                printf "\33[01;31m[$N]\33[0;0m $i\n"
+  	                N=$(( $N + 1 ))
+  	            done
+  	          printf "\nAUTRE CHOIX\n"
+  	          printf "\33[01;31m[I]\33[0;0m adresse IP\n"
+  	          printf "\33[01;31m[X]\33[0;0m supprimer les noms\n"
+  	          echo ''
+  	          read -p "Tapez votre choix: " -sn 1 rep
+  	            case $rep in 
+  	                [0-9])
+  	                      if [[ "${rep}" =~ [[:digit:]] ]] && [ -n "${rep}" ] && [ "${rep}" -le "${#host[@]}" ] && [ "${rep}" -ne '0' ]; then
+  	                        srvname="${host[$(( $rep - 1 ))]%% *}"
+  	                        srvIP="${host[$(( $rep - 1 ))]##* }"
+  	                      fi
+  	                      ;;
+  	                  i|I) clear && showalreadyimport && asksrvIP;;
+			  x|X) sed -i '/^# NFS/,/^$/d' /etc/hosts && clear 
+			      printf "\33[1;32mCTRL+C POUR QUITTER\33[0;00m\n\n" && asksrvIP  
+			    ;;
+  	                    *) printf "Choix \'$rep\' inconnu\n\n" && exit 1 ;;
+       	            esac
+  	                if [ -z "${srvIP}" ]; then
+  	                    exit 1
+			fi
+	      fi
+      }
+
+    	UPcount="$(ip -br a |grep -c UP )"
+          if [ "${UPcount}" -eq '1' ] ; then
+    	    IP="$(ip -br a | grep UP |awk '{print $3}')"
+	    IPcut="$(ip -br a |grep UP |awk '{print $3}' |sed 's+\.+ +3' |awk '{print $1}' |sed 's/$/./')"
+	    nocidr="$(ip -br a |grep UP |awk '{print $3}' |sed 's+/.*++')"
+	    hosts
+            IFS=$'\n'
+            declare -a checkimportIP=(${checkimportIP})
+               for i in ${checkimportIP[@]}; do
+                   if [ "${i}" == "${srvIP}" ] && [ "${numnt}" -eq "${nushmnt}" ]; then
+                     printf "\33[01;32m${checkimport}\33[0;0m\n\n"
+                     exit 1 
+                   fi
+               done
+        else
+	    reseaux_actifs
+            if [[ "${num}" =~ [[:digit:]] ]] && [ "${num}" -gt '0' ] && [ "${num}" -le "${UPcount}" ]; then
+	        IPcut="$(ip -br a |grep UP |awk '{print $3}' |sed -n ${num}p |sed 's+\.+ +3' |awk '{print $1}' |sed 's/$/./')"
+	        nocidr="$(ip -br a |grep UP |awk '{print $3}' |sed -n ${num}p |sed 's+/.*++')"
+	        IP="$(ip -br a |grep UP |awk '{print $3}' |sed -n ${num}p)"
+            else 
+                printf "\33[01;31m\'${num}\' n'est pas compris entre le choix 1 et ${UPcount}\33[0;0m\n\n"
+                exit 1
+            fi
+	  hosts
+	  fi
+  checkimportIP="$(mount |grep -v 'n /s' |cut -d ':' -f '1' |uniq)"
+  checkimport="$(mount |grep -v 'n /s' |grep "^${srvIP}.*chez" |cut -d '/' -f '1,4,5' |tr ':/' ' ' |awk '{print $2": "$1" donne déjà "$3}' |uniq)"
+  mntimport="$(mount |grep -v 'n /s' |grep -c ${srvIP}.*chez)"
+  importIP="$(mount |grep -v 'n s/' |grep ${srvIP}.*chez |cut -d '/' -f '1,4,5' |tr ':/' ' ' |awk '{print $1}' |uniq)"
+  srvname="$(showmount -e ${srvIP} |sed 's: .*$::' |awk -F"/| " '{print $4}' |uniq |sed '/^$/d')"
+  shosname="$(showmount -e ${srvIP} |sed 's: .*$::' |awk -F'/| ' '{print $5}' |sort |sed '/^$/d')"
+  nushmnt="$(showmount -e ${srvIP} --no-header |sed -e 's/ .*//' -e 's/\// /g' |awk '{print $4}' |sed '/^$/d' |wc -l)"
+  numnt="$(mount |grep -v 'n /s' |egrep -c ^${srvIP}.*chez)"
+  lessmnt="$(mount |egrep -v "(/mnt |n /s)" |grep ^$srvIP |tr '/' ' ' |awk '{print $5}' |uniq |tr '\n' '|' |sed 's+|$++')"
+  nulesshow="$(showmount -e ${srvIP} --no-header |sed -e 's/ .*//' -e 's/\// /g' |awk '{print $4}' |sed '/^$/d' |sort |egrep -wv "($lessmnt)" |wc -l)"
+  lesshow="$(showmount -e ${srvIP}  |sort  |sed 's: .*$::' |awk -F'/| ' '{print $5}' |sed '/^$/d' |egrep -wv "($lessmnt)")"
+    if [ -z "${srvname}" ]; then
+	clear
+        printf "[\33[1;31m ECHEC \33[0;00m] Détection serveur windows...\nVérifiez la connection...\n"
+        printf "\nVérifiez vos infos:"
+        printf "\n\t SERVER IP: ${srvIP} ;"
+        printf "\n\t    SERVER: \33[01;31mInatténiable\33[0;0m ;"
+        printf "\n\t    CLIENT: ${prenom_client} ;\n\n"
+        exit 1
+    fi
+      if [ "${nushmnt}" -eq "${numnt}" ]; then
+          printf "\33[01;31mAucune partition disponible de ${srvname}\33[0;0m\n\n"
+          exit 1
+      else
+          clear
+      fi
+        if [ "${nulesshow}" -ne '1' ]; then
+            printf "\33[0;0m[IMPORTATION D'UN SERVEUR]\n\n"
+            printf "Serveur:\33[1;32m ${srvname}\33[0;0m\n\n"
+            read -p "Continuer? [O/n] " -sn 1 rep  
+	      case $rep in 
+	      	 o|O) clear ;;
+	      	 n|N) printf "Annulé\n" && exit 0 ;;
+	      	 *) printf "Erreur\n" && exit 1;;
+	      esac
+        fi
+  srvname="$(showmount -e ${srvIP} |sed 's: .*$::' |awk -F"/| " '{print $4}' |uniq |sed '/^$/d')"
+  shosname="$(showmount -e ${srvIP} |sed 's: .*$::' |awk -F'/| ' '{print $5}' |sort |sed '/^$/d')"
+  nushmnt="$(showmount -e ${srvIP} --no-header |sed -e 's/ .*//' -e 's/\// /g' |awk '{print $4}' |sed '/^$/d' |wc -l)"
+  numnt="$(mount |grep -v 'n /s' |egrep -c ^${srvIP}.*chez)"
+  lessmnt="$(mount |egrep -v "(/mnt |n /s)" |grep ^$srvIP |tr '/' ' ' |awk '{print $5}' |uniq |tr '\n' '|' |sed 's+|$++')"
+  if [ -z "${lessmnt}" ]; then
+      nulesshow="$(showmount -e ${srvIP} |sed -e 's: .*::' |egrep '(/.*){4}' |sort |wc -l)"
+      lesshow="$(showmount -e ${srvIP}  |sort  |sed 's: .*$::' |awk -F'/| ' '{print $5}' |sed '/^$/d')"
+  else
+      nulesshow="$(showmount -e ${srvIP} |sed -e 's: .*::' |egrep '(/.*){4}' |sort |egrep -wv "($lessmnt)" |wc -l)"
+      lesshow="$(showmount -e ${srvIP}  |sort  |sed 's: .*$::' |awk -F'/| ' '{print $5}' |sed '/^$/d' |egrep -wv "($lessmnt)")"
+  fi
+  server="${srvname}"
+  	    if [ "${nulesshow}" -gt '1' ]; then
+	      printf "Quelle partition de ${srvname} ?\n"
+	      declare -a lesshw=($lesshow)
+	      N='1'
+	        for i in ${lesshw[@]}; do
+		    printf "\33[01;31m["$N"]\33[0;0m "${i}"\n"
+		    N=$(( $N + 1 ))
+		done
+  	      echo ''
+  	      read -p "Tapez le numéro : " -sn 1 win ;\
+	            if [[ "${win}" =~ [[:digit:]] ]] && [ "${win}" -le "${#lesshw[@]}" ] && [ "${win}" -ne '0' ]; then
+			 continue
+		     else
+		         clear
+	                 printf "Choix \'$win\' introuvable\n\n"
+	                 exit 1
+	            fi
+	      clear
+	      win12="${lesshw[(( $win - 1 ))]}"
+    	  elif [ "${nulesshow}" -eq '1' ]; then
+    	      printf "\33[01;31m${lesshow} de ${srvname} va être importé\n\n\33[0;0m" 
+    	      read -p 'Continuer [O/n] ? ' -sn 1 rep
+	      clear
+    	        case $rep in
+    	        	    O|o) win12="${lesshow}" && server="${srvname}";;
+    	        	    N|n) printf "Annulé\n" && exit 0 ;;
+    	        	    *) printf "Choix \'$rep\' inconnu\n" && exit 1 ;;
+    	        esac
+	    fi
+	      if [ -z "${win12}" ] || [ -z "${server}" ]; then
+	        printf "Erreur\n\n"
+	        exit 1
+	      fi
+
+  copyhostname
+  hostnamefile="$(cat /home/${prenom_client}/.chez_hostname)"
+  Type="nfs"
+  What="${srvIP}:/srv/nfs/${server}/${win12}"
+  Where="/home/${prenom_client}/${bureau}/chez_${server}@${hostnamefile}/${win12}"
+  unitname="$(systemd-escape "home/${prenom_client}/${bureau}/chez_${server}@${hostnamefile}/${win12}")"
+  unitPath="/etc/systemd/system/${unitname}"
+  Options='_netdev'
+  TimeoutSec='5'
+  ForceUnmount='true'
+  KillMode='process'
+  TimeoutIdleSec='60'
+  LazyUnmount='true'
+
+  		  if mount |grep -qw "chez_${server}@${hostnamefile}/${win12} "; then
+  		    printf "${win12} est déjà sur le bureau\n\n"
+  		    exit 1
+  		  fi
+  		    if test -f "${unitPath}.mount" && test -f "${unitPath}.automount"; then
+  		        printf "[\33[01;32m OK\33[0;0m ] Unit files exist\n"
+  		        printf "[\33[01;32m OK\33[0;0m ] NFS Windows server présent\n\n"
+  		    else
+  		        printf "[Unit]\nDescription=NFS client ${win12}\n\n[Mount]\nWhat=${What}\nWhere=${Where}\nType=${Type}\nOptions=${Options}\nTimeoutSec=${TimeoutSec}\nForceUnmount=${ForceUnmount}\nKillMode=${KillMode}\nLazyUnmount=${LazyUnmount}\n\n[Install]\nWantedBy=multi-user.target\n" > "${unitPath}.mount" ;\
+  		        printf "[Unit]\nDescription=NFS client automount ${win12}\n\n[Automount]\nWhere=${Where}\nTimeoutIdleSec=${TimeoutIdleSec}\n\n[Install]\nWantedBy=multi-user.target\n" > "${unitPath}.automount" ;\
+  		        systemctl -q daemon-reload ;\
+  		        systemctl -q start "${unitname}.automount" ;\
+  		        systemctl -q enable "${unitname}.automount" ;\
+  		    fi
+  active="$(systemctl -q is-enabled ${unitname}.automount)"
+  		      if [ -f "${unitPath}.mount" ] && ${active}; then
+  		          printf "[\33[01;32m OK\33[0;0m ] Création Unit files\n"
+  		          printf "[\33[01;32m OK\33[0;0m ] Activation Unit au démarrage\n"
+			  printf "[\33[01;32m OK\33[0;0m ] Création dossier ${server}@${hostnamefile}/${win12}\n\n"
+  		      else
+  		          printf "[\33[01;31m ECHEC\33[0;0m ] Création et activation de Unit files\n"
+  		          printf "\nVérifiez vos infos:"
+  		          printf "\n         SERVER IP: ${srvIP} ;"
+  		          printf "\n            SERVER: ${server}@${hostnamefile} ;"
+  		          printf "\n            CLIENT: ${prenom_client} ;\n\n\n"
+  		      fi
+	   	    chown "${prenom_client}":"${prenom_client}" "/home/${prenom_client}/${bureau}/chez_${server}@${hostnamefile}/"
+  		    rm /home/${prenom_client}/.chez_hostname
+;;
+3) #STOPPER L'EXPORTATION D'UN PARTAGE PRÉCIS
+  showmnt="$(mount |grep '^/d.* /s' |awk '{print $1" "$3}' |sed 's+/+ +6' |awk '{print $1" "$3}' |sort)"
+  linuxmnt="$(mount |grep linux |grep -c '^/d.* /s')"
+  winsmnt="$(mount |grep -v linux |grep -c '^/d.* /s')"
+  mnt="$(mount |grep -c '^/d.* /s')"
+  countdisk="$(fdisk -l |egrep -ci '(ntfs|microsoft)')"
+       if [ "${mnt}" -eq '0' ];then
+           printf "\33[01;31mActuellement aucune exportation\33[0;0m\n\n"
+           exit 1
+     elif [ "${mnt}" -gt '1' ]; then
+           printf "Actuellement exporté:\n"
+           printf "\33[01;31m${showmnt}\33[0;0m\n\n"
+       fi
+         if [ "${linuxmnt}" -eq '1' ] && [ "${winsmnt}" -eq '0' ]; then
+           choice='1'
+	   printf "linux va être supprimé\n\n"
+	   read -p "Continuer? [O/n]" -sn 1 rep
+	   Continuecase
+         elif [ "${linuxmnt}" -eq '0' ] && [ "${winsmnt}" -ge '1' ]; then
+             choice='2'
+         else
+             printf "\nQuelle exportation souhaitez-vous annuler?\n"
+             printf "\33[01;31m[1] \33[0;0mlinux\n\33[01;31m[2] \33[0;0mwindows\n\n"
+             read -p "Tapez le numéro: " -sn 1 choice ;\
+             clear
+         fi
+         case  ${choice} in
+           1)#STOPPER EXPORTATION LINUX
+             mntpoint="/srv/nfs/${myservername}/linux"
+             unitname="srv-nfs-${myservername}-linux"
+             unitPath="/etc/systemd/system/srv-nfs-${myservername}-linux"
+             if mount |grep -sq ${mntpoint} ; then
+	       if [ "${mnt}" -eq '1' ]; then
+                   sed -i '/#/!d' /etc/exports && exportfs -ar ;\
+	       else
+                   sed -i '/linux/d' /etc/exports && exportfs -ar ;\
+	       fi
+                systemctl -q disable ${unitname}.automount;\
+                systemctl -q stop  ${unitname}.automount;\
+                systemctl -q stop  ${unitname}.mount;\
+                systemctl daemon-reload;\
+                   if ! mount |grep -q '^/d.*linux'; then
+                     rm ${unitPath}.automount;\
+                     rm ${unitPath}.mount;\
+                      if ! mount |grep -q "/srv/nfs/${myservername}/windows"; then
+                        find /srv/nfs/ -maxdepth 2 -empty -delete 
+                      fi
+                   fi
+                     if mount |grep -sq "/srv/nfs/${myservername}/linux "; then
+                         printf "[\33[01;31m ECHEC\33[0;0m ] Arrêt exportation linux\n\n"
+                     else
+                         printf "[\33[01;32m OK \33[0;0m] Arrêt exportation linux\n\n"
+                     fi
+#		       virtualbox
+             fi
+           ;;
+           2)#STOPPER EXPORTATION WINDOWS
+             alreadymnt="$(mount |grep -v linux |grep '^/d.* /s' |awk '{print $1" "$3}' |sed 's+/+ +6' |awk '{print $1" "$3}' |sort)"
+             mntline="$(mount |grep -v linux |grep '^/d.* /s' |sed 's+/+ +6' |awk '{print $4}' | sed -r 's+^.*([0-9])$+\1+' | sed 's_windows_1_' |sort)"
+             winmntcount="$(mount |grep -v linux |grep -c '^/d.* /s')"
+             countdisk="$(fdisk -l |egrep -ci '(ntfs|microsoft)')"
+	   devchoices="$(fdisk -l |egrep -i '(ntfs|microsoft)' | sed -re 's+(\b[[:digit:]]{1,} ){1,3}++g' -e 's/(.*)(\*)(.*)/\1\3 \2/' -e 's+\*+boot+' |awk '{print $1, $2, $4}' |column -t)"
+                 if [ "${winmntcount}" -eq '1' ]; then
+		     DEFAULT="${IFS}"
+	             IFS='\n'
+	             win12="${alreadymnt##* }"
+	             printf "Supprimer:\33[01;31m\n"
+	             printf "$(echo $devchoices | grep ${alreadymnt%% *})  ${win12}\33[0;0m\n\n"
+	             read -p "Continuer ? [O/n] " -n 1 choice 
+		     clear
+	              case $choice in
+	                  o|O)
+  			      mnt="$(mount |grep -c '^/d.* /s')"
+				  if [ "${mnt}" -eq '1' ]; then
+				      sed -i '/#/!d' /etc/exports && exportfs -ar
+				  else
+				      sed -i "/$win12 /d" /etc/exports && exportfs -ar
+				  fi
+			  ;;
+	                  n|N) printf "Annulé\n" && exit 0 ;;
+	                  *) printf "Choix \'$choice\' inconnu\n" && exit 1 ;;
+	              esac
+	         else
+                     printf "Quelle exportation souhaitez-vous annuler?\n"
+                     IFS=$'\n'
+       	             declare -a readymnt=($alreadymnt)
+	                 for m in ${!readymnt[@]}; do
+	                    printf "\33[01;31m[$(( $m + 1 ))]\33[0;0m ${readymnt[$m]%% *}  ${readymnt[$m]##* }\n"
+	             done
+                     echo ''
+                     read -p "Tapez le numéro: " -sn 1 choice ;\
+                     clear
+                           if [ -n "${choice}" ] && [ "${choice}" -le "${winmntcount}" ] && [ "${choice}" -ne '0' ] && [[ "${choice}" =~ ^[[:digit:]]$ ]]; then
+			       continue
+			   else
+                               printf "Réponse incorrecte\n"
+                               exit 1
+                           fi
+                     win12="${readymnt[(( $choice - 1 ))]##* }"
+                     sed -i "/$win12 /d" /etc/exports;\
+	         fi
+       IFS="${DEFAULT}"
+       mntpoint="/srv/nfs/${myservername}/${win12}"
+       linuxmntpoint="/srv/nfs/${myservername}/linux"
+       unitname="$(systemd-escape srv/nfs/${myservername}/${win12})"
+       unitPath="/etc/systemd/system/$unitname"
+       	        if mount |grep -wqs "/srv/nfs/${myservername}/${win12}"; then
+       	            if mount |grep -wqs "^/d.*${win12}"; then
+       	                exportfs -ar ;\
+       	                systemctl -q disable ${unitname}.automount;\
+       	                systemctl -q stop  ${unitname}.automount;\
+       	                systemctl -q stop  ${unitname}.mount;\
+       	                systemctl daemon-reload;\
+       	                  if ! mount |grep -q "^/d.* /s.*${win12} "; then
+       	                    rm ${unitPath}.automount;\
+       	                    rm ${unitPath}.mount;\
+       	                      if ! mount |grep -v linux |grep -q /srv/nfs/${myservername}/ && ! mount |grep -q "${linuxmntpoint}"; then
+       	                          find /srv/nfs/ -maxdepth 2 -empty -delete
+       	                      else
+       	                          while [ -d "${mntpoint}" ]; do
+       	                               rmdir ${mntpoint}
+       	                               mntpoint="/srv/nfs/${myservername}/${win12} "
+       	                          done
+       	                      fi
+       	                  fi
+       	                    if mount |grep -wq ${mntpoint}; then
+       	                        printf "[\33[01;31m ECHEC\33[0;0m ] Arrêt exportation ${win12}\n\n"
+       	                    else
+       	                        printf "[\33[01;32m OK \33[0;0m] Arrêt exportation ${win12} \n\n"
+       	                    fi
+       	            else
+       	                printf "\n\'${win12}\' n'est pas partagé\n\n"
+	            fi
+	        fi
+  	      ;;
+  	      *) printf "\33[01;31mChoix \'${choice}\' introuvable\33[0;0m\n\n"
+  	   ;;
+  	   esac
+startautomnt
+		   if ! mount |grep -q '^/d.*nfs'; then
+   			deleteFW
+   			delNFSgroup
+		   fi
+;;
+4) #STOPPER EXPORTATION DE TOUS LES PARTAGES
+  sed -i '/#/!d' /etc/exports && exportfs -ar;
+  unitnames="$(mount |grep -v '^/dev/fuse' |egrep '^/d.* /.*/.*/' |awk '{print $3}' |sed 's/^\///' |tr '/' '-')"
+  IFS=$'\n'
+  set "${unitnames}"
+    for i in $@; do
+        if [ -f /etc/systemd/system/${i}.mount ] && [ -f /etc/systemd/system/${i}.automount ]; then
+          set disable automount stop automount stop mount
+            for o in $@; do
+                while [ "$#" -ne '0' ]; do
+                     systemctl -q ${1} ${i}.${2}
+                     systemctl -q daemon-reload
+                     shift 2
+                done
+            done
+        fi
+    done
+    clear
+          if mount |grep -v '^/dev/fuse' |egrep '^/d.* /.*/.*/'; then
+              printf "[\33[01;31m ECHEC\33[0;0m ] Arrêt exportation linux-windows\n\n"
+              exit 1
+          else
+	      if ! ls /srv/nfs/ &>/dev/null ; then
+                  printf "[\33[01;32m OK \33[0;0m] Arrêt exportation linux-windows\n\n"
+	      else
+                  find /srv/nfs/ -depth -type d -empty -delete -name "${myservername}"
+                  find /etc/systemd/system/ -type f -name "srv-nfs-*" -exec rm {} \;
+                  printf "[\33[01;32m OK \33[0;0m] Nettoyage de /etc/exportfs\n"
+                  printf "[\33[01;32m OK \33[0;0m] Arrêt exportation linux-windows\n"
+                  printf "[\33[01;32m OK \33[0;0m] Suppression dossiers linux-windows\n\n"
+	      fi
+          fi
+  unitname="$(find /etc/systemd/system/ -maxdepth 1 -name "*chez*" -exec basename {} \;)"
+  importmnt="$(mount |grep -c "^systemd.* /home.*chez")"
+  countunit="$(find /etc/systemd/system/ -maxdepth 1 -name "*chez*" |wc -l)"
+  if [ "${countunit}" -ne '0' ]; then
+      unitname="$(timeout 2s find /etc/systemd/system/ -name "*chez*" -exec basename {} \; |sed 's_\..*__')"
+      declare -a unit=($unitname)
+	for i in ${!unit[@]}; do
+	    if [ $(systemctl is-active ${unit[$i]}.automount) == 'inactive' ]; then
+	      systemctl -q start ${unit[$i]}.mount
+	      systemctl -q start ${unit[$i]}.automount
+	      systemctl -q enable ${unit[$i]}.automount
+	    fi
+    done
+  fi
+  startautomnt
+#  virtualbox
+  deleteFW
+  delNFSgroup
+  exit 0
+;;
+5) #SUPPRIMER L'IMPORTATION D'UN SERVEUR
+  unitfails="$(systemctl --state=failed |grep 'chez.* loaded' |awk -F' |\.' '{print $2}')"
+  countunitfails="$(systemctl --state=failed |grep 'chez.* loaded' |awk -F' |\.' '{print $2}' |wc -l)"
+  pathunitfails="$(systemctl --state=failed |grep 'chez.* loaded' |awk -F' |\.' '{print $2}' |tr '-' '/' |sed 's+\x40+@+g')"
+  notfound="$(systemctl --state=failed |grep 'chez.*not-found' |awk -F' |\.' '{print $2}')"
+  if [ -n "${pathunitfails}" ]; then
+    countmntfails="$(mount |grep -c $(echo ${pathunitfails}))"
+  fi
+  namefails="$(systemctl --state=failed |grep 'chez.* loaded' |awk -F'-|\.' '{print $5" "$4}')"
+  declare -a name=($namefails)
+
+  deleteunitfails () {
+      case $rep in
+	      o|O)
+		  declare -a unit=($unitfails)
+		  declare -a notf=($notfound)
+		  declare -a path=($pathunitfails)
+		    for i in ${unit[@]};do
+		        systemctl -q disable ${i}.automount
+		        systemctl -q disable ${i}.automount
+		        systemctl -q stop ${i}.automount
+        	        systemctl -q stop ${i}.mount
+		        rm /etc/systemd/system/${i}.mount 
+		        rm /etc/systemd/system/${i}.automount 
+        	        systemctl -q daemon-reload
+		        systemctl -q reset-failed "${i}*mount"
+		    done
+		    	home="/home/${prenom_client}/${bureau}/"
+			chez="$(find $home -maxdepth 1 -name 'chez*')"
+	          	declare -a cheztous=(${chez})
+	          	for i in ${cheztous[@]}; do
+	          	    find $i -maxdepth 1 -empty -delete
+	          	done
+		  clear
+		  printf "Terminé\n\n"
+		  exit 0
+		  ;;
+	      n|N) printf "\33[01;31mAnnulé\n\n\33[0;0m" && exit 0 ;;
+	        *) printf "Choix \'$rep\' inconnu" && exit 1;;
+	esac
+	  }
+
+    if [ -n "${countunitfails}" ] && [ "${countunitfails}" -eq '1' ]; then
+      printf "\n\33[01;31m${name[*]} est connecté avec une erreur\33[0;0m\n\n"
+      printf "1) Allez ${name[1]} supprimer ${name[0]//_/ }, s'il est allumé\n"
+      printf "2) Une fois supprimé vous pouvez continuer\n\n"
+      read -p "Continuer? [O/n] " -sn 1 rep
+      deleteunitfails
+      exit 0
+  elif [ -n "${countunitfails}" ] && [ "${countunitfails}" -gt '1' ]; then
+      printf "\n\33[1;32mCTRL+C POUR QUITTER\33[0;00m\n\n" 
+      printf "\33[01;31mSERVEURS connectés avec une erreur\33[0;0m\n"
+      printf "PRECAUTION avant de continuer\n"
+      printf "1) Allez sur leur PC supprimer l'exportation \n"
+      printf "2) Une fois supprimé vous pouvez continuer\n\n"
+      read -p "Continuer? [O/n] " -sn 1 rep
+      deleteunitfails
+      exit 0
+    fi
+  if [ -n "${countmntfails}" ] && [ "${countmntfails}" -eq '0' ] && [ "${countunitfails}" -ne '0' ]; then
+    rep='o'
+    deleteunitfails
+    printf "\n\33[01;32mErreur supprimée\33[0;0m\n\n"
+    exit 0
+  fi
+  	checkmnt="$(mount |grep -v 'n /s' |grep 'chez' )"
+	checkimport="$(mount |grep -v 'n /s' |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |tr '/:' ' ' | sed 's:chez_:chez :' |awk '{print $1,$10,$11" donne "$12}' |uniq |column -t |sort)"
+	  numnt="$(mount |grep -v 'n /s' |egrep -c "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez")"
+      if [ "${numnt}" -gt '1' ];then
+        ipsrvos="$(mount |grep -v 'n /s' |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |tr ':/' ' ' |awk '{print $1,$10,$11}' |sed 's:chez_::' |uniq |column -t |sort)"
+        printf "\33[1;32mCTRL+C POUR QUITTER\33[0;00m\n\n"
+        printf "[SUPPRIMER IMPORTATION D'UN SERVEUR]\n\n\n"
+        printf "Serveur actuellement sur le bureau:\n"
+        IFS=$'\n'
+        N='1'
+        declare -a chkimport=(${checkimport[@]})
+        declare -a IPsrvOS=(${ipsrvos[@]})
+          for i in ${checkimport[@]}; do
+              printf "\33[01;31m[$N]\33[0;0m $i\n" 
+              N=$(( $N + 1 ))
+          done
+        echo ''
+	if [ "${#chkimport[@]}" -le '9' ]; then
+            read -p "Tapez le numéro: " -sn 1 num
+        else
+            read -p "Tapez le numéro: " -n 2 num
+	fi
+        clear
+              if [[ "${num}" =~ [[:digit:]] ]] && [ "${num}" -ne '0' ] && [ "${num}" -le "${#chkimport[@]}" ]; then
+                  srvIP="${IPsrvOS[(( $num - 1 ))]/ *}"
+                  win12="${chkimport[(( $num - 1 ))]##* }"
+		  os="${win12}"
+		  server="$(echo ${IPsrvOS[(( $num - 1 ))]} |awk '{print $2}')"
+		  chezhostname="$(echo ${IPsrvOS[(( $num - 1 ))]} |awk '{print $2}' |sed -e 's_@_\\x40_' -e 's:^:chez_:')"
+	      else
+      	          printf "\33[01;31mChoix \'${num}\' incorrect\n\n\33[0;0m"
+		  exit 1
+              fi
+                if [ -z "${win12}" ] &&  [ -z "${srvIP}" ]; then
+                  printf "\33[01;31mChoix incorrect\33[0;0m\n"
+                  exit 1
+                fi
+      fi
+	if [ "${numnt}" -eq '1' ]; then
+	  numOS="$(mount |grep -v 'n /s' |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |sed 's_/_ _4' |awk '{print $2}' |sed -e 's_x$_x0_' -e 's+s$+s1+' |tr -d 'lwinuxdows' |uniq |sort)"
+	  printf "\33[1;32mCTRL+C POUR QUITTER\33[0;00m\n\n"
+	  printf "[SUPPRIMER IMPORTATION D'UN SERVEUR]\n\n\n"
+	  printf "Serveur actuellement sur le bureau:\n"
+	  printf "\33[01;31m${checkimport}\33[0;0m\n\n"
+	  read -p "Supprimer [O/n] ? " -sn 1 rep 
+	  Continuecase
+	  rep="${numOS}"
+	        if [[ "${rep}" =~ [[:digit:]] ]] && [ -n "${rep}" ] && [ "${numnt}" -eq '1' ]; then
+	          os="$(mount |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |sed -re 's_/_ _4' -e 's_.* (.*) o.*_\1_' |uniq)"
+	          server="$(mount |grep -v 'on /srv' |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |sed  's_/_ _g' |awk '{print $4}' |uniq)"
+		  win12="${os}"
+	          srvIP="$(mount |grep -v 'on /srv' |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |awk -F':' '{print $1}')"
+		  chezhostname="$(mount |grep -v 'on /srv' |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |sed 's_/_ _g' |awk '{print $10}' |uniq |sed 's_@_\\x40_')"
+	        fi
+	fi
+  case ${os} in
+    linux)#SUPPRIMER IMPORTATION LINUX
+      unitname="home-${prenom_client}-${bureau}-${chezhostname}-linux"
+      unitPath="/etc/systemd/system/home-${prenom_client}-${bureau}-${chezhostname}-linux"
+      home="/home/${prenom_client}/${bureau}/"
+      activ="$(systemctl is-active ${unitname})"
+      fail="$(systemctl is-failed ${unitname})"
+        if [ -f "${unitPath}.mount" ] && [ -f "${unitPath}.automount" ]; then
+	  set disable automount stop automount stop mount
+           for i in $@; do
+	       while [ $# -ne '0' ]; do
+	            systemctl -q $1 "${unitname}.$2" ;\
+                    shift 2
+               done
+           done
+        fi
+          if [ "${activ}.mount" == 'active' ] && [ "${activ}.automount" == 'active' ]; then
+              printf "unit tjrs actives\n"
+              exit 1
+          elif [ "${fail}.mount" == 'inactive' ] || [ "${fail}.automount" == 'inactive' ]; then
+              printf "[\33[01;31m FAILED\33[0;0m ] units \n"
+              exit 1
+          else
+	      rm "${unitPath}"*
+              systemctl -q daemon-reload ;\
+          fi
+      checklinux="$(mount |egrep -v "n /s" |egrep -c "${srvIP}.*linux type")"
+      checkwin="$(mount |egrep -v "(n /s|linux)" |egrep -c "${srvIP}.* type")"
+      home="/home/${prenom_client}/${bureau}/"
+      chez="$(find $home -maxdepth 1 -name 'chez*')"
+	          	declare -a cheztous=(${chez})
+	          	for i in ${cheztous[@]}; do
+	          	    find $i -maxdepth 1 -empty -delete
+	          	done
+	    if [ "${checkwin}" -eq '0' ] && [ "${checklinux}" -eq '0' ]; then
+	        printf "[ \33[01;32mOK \33[0;0m] Démontage dossier du serveur ${chezhostname}\n"
+	        printf "[\33[01;32m OK \33[0;0m] Suppression dossier ${chezhostname}\n\n"
+	    elif [ "${checklinux}" -eq '0' ]; then
+	        printf "[ \33[01;32mOK \33[0;0m] Démontage dossier serveur linux\n"
+	        printf "[\33[01;32m OK \33[0;0m] Suppression dossier linux\n\n"
+	    else 
+	        printf "[ \33[01;31mECHEC \33[0;0m] Démontage dossier serveur linux\n"
+	        printf "[\33[01;31m ECHEC \33[0;0m] Suppression dossier linux\n\n"
+	    fi
+    ;;
+    *)#SUPPRIMER IMPORTATION WINDOWS
+      findpath="/home/${prenom_client}/${bureau}/"
+      unitname="home-${prenom_client}-${bureau}-${chezhostname}-${win12}"
+      unitPath="/etc/systemd/system/${unitname}"
+        if [ -f "${unitPath}.mount" ] && [ -f "${unitPath}.automount" ]; then
+	   set disable automount stop automount stop mount
+           for i in $@; do
+	       while [ $# -ne '0' ]; do
+	            systemctl -q $1 ${unitname}.$2 ;\
+                    shift 2
+               done
+           done
+        fi
+      activ="systemctl -q is-active ${unitname}"
+      fail="systemctl -q is-failed ${unitname}"
+           if systemctl -q is-active ${unitname}.mount && systemctl -q is-active ${unitname}.automount; then
+               printf "unit tjrs actives\n"
+               exit 1
+           elif systemctl -q is-failed ${unitname}.mount || systemctl -q is-failed ${unitname}.automount; then
+               printf "[\33[01;31m FAILED\33[0;0m ] units ]"
+               exit 1
+           else
+               rm "${unitPath}".* ;\
+               systemctl -q daemon-reload ;\
+           fi
+      countwin="$(mount |egrep -v "on /srv" |egrep -wc ^${srvIP}:.*${win12} )"
+      checkwin12="$(mount |grep -v 'on /srv' |grep -w ^${srvIP}:.*${win12} |awk '{print $3}')"
+      checklinux="$(mount |grep -v 'on /srv' |egrep -c ^${srvIP}.*linux)"
+      checkwins="$(mount |egrep -v 'on /srv|linux' |grep -c "^${srvIP}:.* type")"
+		    	home="/home/${prenom_client}/${bureau}/"
+			chez="$(find $home -maxdepth 1 -name 'chez*')"
+	          	declare -a cheztous=(${chez})
+	          	for i in ${cheztous[@]}; do
+	          	    find $i -maxdepth 1 -empty -delete
+	          	done
+      	         if [ "${checkwins}" -eq '0' ] && [ "${checklinux}" -eq '0' ]; then
+      	             printf "[ \33[01;32mOK \33[0;0m] Démontage dossier du serveur ${chezhostname}\n"
+      	             printf "[\33[01;32m OK \33[0;0m] Suppression dossier ${chezhostname}\n\n"
+      	         fi
+      	           if [ -d "${checkwin12}" ] ;then
+      	               printf "[ \33[01;31mECHEC \33[0;0m] Démontage dossier ${win12}\n"
+      	               printf "[\33[01;31m ECHEC \33[0;0m] Suppression dossier ${win12}\n\n"
+      	               exit 1
+      	           else
+      	               printf "[ \33[01;32mOK \33[0;0m] Démontage dossier ${win12}\n"
+      	               printf "[\33[01;32m OK \33[0;0m] Suppression dossier ${win12}\n\n"
+      	           fi
+      ;;
+    esac
+  delNFSgroup
+;;
+6) #STOPPER L'IMPORTATION DE PLUSIEURS LES SERVEURS
+  IFS=$'\n'
+  checkimport="$(mount |egrep "^([0-9]{1,3}\.){3}[0-9]{1,3}.*chez" |cut -d '/' -f '1,4,5' |tr ':/' ' ' |awk '{print "IP: "$1" de "$2" donne "$3}' |uniq |column -t |sort)"
+  countunit="$(find /etc/systemd/system/ -name "home-${prenom_client}-${bureau}-chez*\.mount" |wc -l)"
+  importmnt="$(mount |grep "^systemd.* /home.*chez")"
+  declare -a mnt=($importmnt)
+   if [ "${countunit}" -ge '1' ]; then
+     printf "\33[1;32mCTRL+C POUR QUITTER\33[0;00m\n\n"
+     printf "[SUPPRIMER IMPORTATION DE SERVEURS]\n\n\n"
+     printf "Serveur actuellement sur le bureau:\n"
+     var="${checkimport}"
+     IFS=$'\n'
+     set "${var}"
+       for i in $@ ;do
+         printf "\33[01;31m$i\33[0;0m\n"
+       done
+   fi
+     if [ "${countunit}" -eq '0' ]; then
+     	 printf "Aucun montage existant\n"
+     	 exit 1
+     else
+         echo ''
+         read -p "Continuer? [O/n] " -sn 1 choice
+     fi
+  cutname="home-${prenom_client}-${bureau}"
+  countmntIP="$(mount |grep -v 'n /s' |egrep -c "^([0-9]{1,3}\.){3}[0-9]{1,3}".*chez_)"
+  setservernameAndOS="$(mount |grep /home/${prenom_client}/${bureau}/chez_ |grep -v systemd |tr '/' ' ' |awk '{print $10"-"$11}')"
+  unit="$(mount |grep "^systemd.* /home.*chez" |awk '{print $3}')"
+  homepath="/home/${prenom_client}/${bureau}/"
+  declare -a mnt=($unit)
+    case $choice in
+    	o) if [ "${#mnt[@]}" -ne '0' ]; then
+		for i in ${mnt[@]}; do
+		   ii="$(systemd-escape "$i" |sed 's+^-++')"
+     		   systemctl -q disable ${ii}.automount
+     		   systemctl -q stop ${ii}.automount
+     		   systemctl -q stop ${ii}.mount
+     		   systemctl -q daemon-reload
+              	       done
+    	      	       var='en cours.'
+              	       while [ "${#mnt[@]}" -ne '0' ]; do 
+              	            clear
+              	            printf "${var}"
+              	            var="$(echo $var |sed "s/\.$/\.\./")"
+		            sleep 1
+  			    declare -a mnt=($unit)
+  			    unit="$(mount |grep "^systemd.* /home.*chez" |awk '{print $3}')"
+     		done
+            fi
+	    clear
+              if [ "${#mnt[@]}" -eq '0' ]; then
+                find /etc/systemd/system/ -type f -name '*chez*' -exec rm {} \;
+                IFS=$'\n'
+		chez_everybody="$(find ${homepath} -maxdepth 1 -name 'chez*')"
+		declare -a all=($chez_everybody)
+                systemctl -q daemon-reload ;\
+		  if [ "${#all[@]}" -ne '0' ]; then
+                     for a in ${all[@]}; do
+                        umnt="$(find ${a} -depth -maxdepth 1 -empty -delete)"
+                          for b in ${umnt[@]}; do
+                                if [ "$?" -eq '0' ]; then
+                                  printf "[\33[01;32m OK \33[0;0m] Suppression ${b}\n"
+                              else
+                                  printf "[\33[01;31m ECHEC \33[0;0m] Suppression ${b}\n"
+                                fi
+		         done
+                              if [ "$?" -eq '0' ]; then
+                                printf "[\33[01;32m OK \33[0;0m] Suppression ${a}\n"
+                              fi
+		    done
+		  fi
+             fi
+	    folderchez="$(find ${homepath} -maxdepth 1 -name 'chez*')"
+            IFS=$'\n'
+	    declare -a chez=($folderchez)
+	    for a in ${chez[@]}; do
+	           find $a -maxdepth 1 -empty 
+	       if [ "${#chez[@]}" -ne '0' ]; then
+                  printf "[\33[01;31m ECHEC \33[0;0m] Démontage ${homepath}chez_tout_le_monde\n"
+                  printf "[\33[01;31m ECHEC \33[0;0m] Suppression ${homepath}chez_tout_le_monde\n\n"
+    	           homepath="/home/${prenom_client}/${bureau}/"
+     		   folderchez="$(find ${homepath} -maxdepth 1 -name 'chez*')"
+	       else
+                   printf "[\33[01;32m OK \33[0;0m] Démontage ${homepath}chez_tout_le_monde\n\n"
+	       fi
+         done
+       ;;
+        n) printf "Démontage Annulé\n\n" && exit 1 ;;
+   esac
+       if systemctl --state=failed |grep chez.*not-found; then
+          systemctl reset-failed '*chez*'
+       fi
+   delNFSgroup
+;;
+7) serverbeforeNFSremove && apt-get purge -y nfs-kernel-server;;
+8) clientbeforeNFSremove && apt-get purge -y nfs-common;;
+*) printf "\33[01;31mChoix \'${config}\' inconnu\33[0;0m\n\n" && exit 1;;
+esac
+
+}
+
+if [ -n "$1" ] && [[ "$1" =~ [[:alpha:]]{4,5} ]]; then
+    while [ "$#" -ne '0' ]; do
+         case $1 in
+             stop)
+		  if [ "$*" == 'stop' ] && [ "$#" -eq '1' ]; then
+		     countunit="$(find /etc/systemd/system -name '*chez*' |wc -l)"
+  			if [ "${countunit}" -eq '0' ]; then
+  			    config='4'
+  			    body 
+  			else
+			    IFS=' '
+  			    stp="6 4"
+  			    set $stp
+  			        for i in $@; do
+  			            config="${i}"
+  			    	      body 
+  			            shift 1
+  			        done
+  			fi
+		    else
+			printf "Choix\33[01;31m \'$(echo $* |tr '\n' ' ')\' \33[0;0minconnu\n"
+			exit 1
+		  fi
+                ;;
+	      aide) clear && printf "Rappel\n(Dans un restaurant, le serveur sert le client)\n\nLe SERVEUR donne ses propres partitions à un autre PC\nLe CLIENT prend les partitions d'un autre PC\nLe SERVEUR peut aussi être le CLIENT et inversement\n\nsudo nfs stop   	:Arrête l'importation, l'exportation et le serveur\nsudo nfs donne truc	:Authorise truc (ex: /home/TOTO/dossier) sur NFS\n\n"
+		     exit 0
+		;;
+	    donne)
+		    if [ -f "$2" ] || [ -d "$2" ]; then
+		        setfacl -Rm g:\1010:rwX $2
+			echo 'OK'
+		        exit 0
+	            else
+		        printf "Choix \'$2\' n'existe pas\n"
+		        exit 1
+		    fi
+		;;
+		*) printf "Vous voulez dire stop ou aide?\n" && exit 1 ;;
+         esac
+    done
+else
+	if [[ "${config}" =~ [[:digit:]]{1} ]]; then
+	    body
+	else
+	    round
+    	    #menuentry
+    	    body
+	fi
+fi
